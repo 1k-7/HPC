@@ -29,7 +29,6 @@ logger = logging.getLogger(__name__)
 
 # --- Part 1: The Worker Logic (Pyrogram) ---
 
-# This is the Pyrogram client that will act as the worker
 userbot = PyrogramClient(
     "userbot_session",
     api_id=API_ID,
@@ -40,8 +39,7 @@ userbot = PyrogramClient(
 async def job_handler(client, message):
     """This function is the userbot worker. It listens to 'Saved Messages'."""
     text = message.text
-    if not text or not text.startswith("process|"):
-        return
+    if not text or not text.startswith("process|"): return
 
     logger.info(f"Userbot received job: {text}")
     parts = text.split('|', 3)
@@ -84,7 +82,6 @@ async def job_handler(client, message):
         if os.path.exists(full_path):
             os.remove(full_path)
 
-# Add the job handler to the userbot client
 userbot.add_handler(PyrogramMessageHandler(job_handler, PyrogramFilters.chat("me") & PyrogramFilters.text))
 
 # --- Part 2: The Manager Logic (python-telegram-bot) ---
@@ -126,7 +123,6 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         media_urls = sorted(list(set(media_urls)))
 
-        # Dispatch jobs by sending them to our own "Saved Messages"
         for media_url in media_urls:
             job_message = f"process|{chat_id}|{initial_url}|{media_url}"
             await userbot.send_message("me", job_message)
@@ -154,7 +150,6 @@ def run_web_server():
     httpd.serve_forever()
 
 async def main():
-    # Check for all required environment variables
     if not all([TELEGRAM_BOT_TOKEN, API_ID, API_HASH, USERBOT_SESSION_STRING]):
         raise ValueError("One or more required environment variables are missing!")
 
@@ -168,16 +163,28 @@ async def main():
     ptb_app.add_handler(CommandHandler("start", start_command))
     ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_url))
 
-    # Run both the PTB bot and Pyrogram userbot concurrently
-    async with ptb_app, userbot:
-        logger.info("Starting PTB application...")
-        await ptb_app.start()
-        await ptb_app.updater.start_polling()
-        
-        logger.info("Pyrogram userbot is also running and listening for jobs...")
-        
-        # Keep the script alive
-        await asyncio.Event().wait()
+    # --- NEW: Correctly run both clients concurrently ---
+    # We initialize PTB but don't start polling yet.
+    await ptb_app.initialize()
+    
+    # We start both the userbot and the PTB application in the background.
+    # PTB's start() begins fetching updates but doesn't block.
+    # userbot.start() connects to Telegram and starts its update loop.
+    await userbot.start()
+    await ptb_app.start()
+    
+    # start_polling() is also non-blocking when run this way.
+    await ptb_app.updater.start_polling()
+    
+    logger.info("Both PTB and Pyrogram clients are running concurrently.")
+    
+    # Keep the script alive indefinitely.
+    await asyncio.Event().wait()
+    
+    # Graceful shutdown (will likely not be reached in a server environment)
+    await ptb_app.updater.stop()
+    await ptb_app.stop()
+    await userbot.stop()
 
 if __name__ == '__main__':
     print("Starting All-in-One Bot...")
