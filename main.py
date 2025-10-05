@@ -13,9 +13,9 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.request import HTTPXRequest
 
-# Pyrogram imports for the userbot worker
-from pyrogram import Client as PyrogramClient, filters as PyrogramFilters
-from pyrogram.handlers import MessageHandler as PyrogramMessageHandler
+# Pyrogram imports for the userbot
+from pyrogram import Client as PyrogramClient
+from pyrogram.errors import FloodWait
 
 # --- Configuration for Deployment ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -27,30 +27,9 @@ USERBOT_SESSION_STRING = os.environ.get("USERBOT_SESSION_STRING")
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Part 1: The Worker Logic (Pyrogram) ---
-
-userbot = PyrogramClient(
-    "userbot_session",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    session_string=USERBOT_SESSION_STRING
-)
-
-async def job_handler(client, message):
-    """This function is the userbot worker. It listens to 'Saved Messages'."""
-    text = message.text
-    if not text or not text.startswith("process|"): return
-
-    logger.info(f"Userbot received job: {text}")
-    parts = text.split('|', 3)
-    if len(parts) != 4:
-        logger.error("Invalid job format.")
-        return
-    
-    await message.delete()
-    
-    _, original_chat_id, referer_url, media_url = parts
-    
+# --- UPLOADER FUNCTION with FloodWait Handling ---
+async def download_and_upload_item(app, chat_id, media_url, referer_url):
+    """Downloads a single file and uploads it using the provided, active Pyrogram client."""
     local_filename = media_url.split('/')[-1].split('?')[0]
     if len(local_filename) > 60 or not local_filename:
         file_ext = os.path.splitext(media_url.split('/')[-1].split('?')[0])[1]
@@ -60,7 +39,7 @@ async def job_handler(client, message):
     full_path = os.path.join(temp_dir, local_filename)
 
     try:
-        logger.info(f"Userbot downloading {media_url} for user {original_chat_id}...")
+        logger.info(f"Downloading {media_url}...")
         headers = {'Referer': referer_url}
         with requests.get(media_url, headers=headers, stream=True) as r:
             r.raise_for_status()
@@ -68,32 +47,38 @@ async def job_handler(client, message):
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
 
-        logger.info(f"Userbot uploading {full_path} to user {original_chat_id}...")
-        if any(ext in full_path.lower() for ext in ['.mp4', '.mov', '.webm']):
-            await client.send_video(int(original_chat_id), full_path)
-        else:
-            await client.send_photo(int(original_chat_id), full_path)
-        logger.info("Userbot job complete.")
+        is_video = any(ext in full_path.lower() for ext in ['.mp4', '.mov', '.webm'])
+        
+        # --- NEW: FloodWait Handling and Retry Logic ---
+        while True:
+            try:
+                logger.info(f"Uploading {full_path} to user {chat_id}...")
+                if is_video:
+                    await app.send_video(chat_id, full_path)
+                else:
+                    await app.send_photo(chat_id, full_path)
+                logger.info(f"Successfully sent {local_filename}.")
+                break # Exit the loop on success
+            except FloodWait as e:
+                logger.warning(f"FloodWait received. Sleeping for {e.value} seconds.")
+                await asyncio.sleep(e.value + 5) # Sleep for the required time + a buffer
+        # --- END OF NEW LOGIC ---
 
     except Exception as e:
-        logger.error(f"Userbot failed to process {media_url}: {e}")
-        await client.send_message(int(original_chat_id), f"⚠️ Worker failed to download/send file: {media_url}")
+        logger.error(f"Failed to process {media_url}: {e}")
     finally:
         if os.path.exists(full_path):
             os.remove(full_path)
 
-userbot.add_handler(PyrogramMessageHandler(job_handler, PyrogramFilters.chat("me") & PyrogramFilters.text))
-
-# --- Part 2: The Manager Logic (python-telegram-bot) ---
-
+# --- MAIN BOT (PTB) LOGIC ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 All-in-One Bot. Send an album or individual media link.")
+    await update.message.reply_text("👋 Hello! Send me a link to an album or a single media page.")
 
 async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     initial_url = update.message.text.strip()
-    chat_id = update.message.chat_id
+    chat_id = update.message.chat.id
     
-    await update.message.reply_text("✅ Link received. Scraping and dispatching jobs...")
+    await update.message.reply_text("✅ Link received. Scraping...")
 
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
@@ -123,18 +108,29 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         media_urls = sorted(list(set(media_urls)))
 
-        for media_url in media_urls:
-            job_message = f"process|{chat_id}|{initial_url}|{media_url}"
-            await userbot.send_message("me", job_message)
+        await update.message.reply_text(f"👍 Found {len(media_urls)} files. Starting batch upload session...")
+
+        # --- NEW: Batch Processing Logic ---
+        # Create one userbot client for the entire batch of files
+        app = PyrogramClient(
+            "userbot_session",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            session_string=USERBOT_SESSION_STRING
+        )
+        async with app:
+            # Create a list of tasks to run concurrently
+            tasks = [download_and_upload_item(app, chat_id, media_url, initial_url) for media_url in media_urls]
+            await asyncio.gather(*tasks)
+        # --- END OF NEW LOGIC ---
         
-        await update.message.reply_text(f"👍 Found {len(media_urls)} files. Jobs dispatched. Your files will be sent shortly.")
+        await update.message.reply_text("✅ All tasks complete.")
 
     except Exception as e:
         logger.error(f"Manager error: {e}", exc_info=True)
         await context.bot.send_message(chat_id, f"An error occurred: {type(e).__name__}")
 
-# --- Part 3: The Keep-Alive Server and Main Runner ---
-
+# --- Keep-Alive Server and Main Runner ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -149,43 +145,20 @@ def run_web_server():
     logger.info(f"Keep-alive server running on port {port}")
     httpd.serve_forever()
 
-async def main():
+def main():
     if not all([TELEGRAM_BOT_TOKEN, API_ID, API_HASH, USERBOT_SESSION_STRING]):
         raise ValueError("One or more required environment variables are missing!")
 
-    # Start the keep-alive web server in a separate thread
     web_thread = Thread(target=run_web_server, daemon=True)
     web_thread.start()
 
-    # Setup the main PTB bot
     request = HTTPXRequest(connect_timeout=10.0, read_timeout=30.0)
-    ptb_app = Application.builder().token(TELEGRAM_BOT_TOKEN).request(request).build()
-    ptb_app.add_handler(CommandHandler("start", start_command))
-    ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_url))
-
-    # --- NEW: Correctly run both clients concurrently ---
-    # We initialize PTB but don't start polling yet.
-    await ptb_app.initialize()
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).request(request).build()
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_url))
     
-    # We start both the userbot and the PTB application in the background.
-    # PTB's start() begins fetching updates but doesn't block.
-    # userbot.start() connects to Telegram and starts its update loop.
-    await userbot.start()
-    await ptb_app.start()
-    
-    # start_polling() is also non-blocking when run this way.
-    await ptb_app.updater.start_polling()
-    
-    logger.info("Both PTB and Pyrogram clients are running concurrently.")
-    
-    # Keep the script alive indefinitely.
-    await asyncio.Event().wait()
-    
-    # Graceful shutdown (will likely not be reached in a server environment)
-    await ptb_app.updater.stop()
-    await ptb_app.stop()
-    await userbot.stop()
+    print("Batch Processing Bot is running...")
+    application.run_polling()
 
 if __name__ == '__main__':
-    print("Starting All-in-One Bot...")
-    asyncio.run(main())
+    main()
