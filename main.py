@@ -22,17 +22,16 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 USERBOT_SESSION_STRING = os.environ.get("USERBOT_SESSION_STRING")
+BOT_USERNAME = os.environ.get("BOT_USERNAME") # e.g., "@MyDownloaderBot"
+USERBOT_USER_ID = int(os.environ.get("USERBOT_USER_ID")) # Your numerical Telegram ID
 
 # --- Setup Logging ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- UPLOADER FUNCTION with Correct Forwarding Logic ---
-async def process_and_forward_item(app, context, chat_id, media_url, referer_url):
-    """
-    Downloads a file, uploads it to 'Saved Messages' via userbot,
-    and then has the main bot forward it to the user.
-    """
+# --- ON-DEMAND UPLOADER (sends to the bot) ---
+async def upload_to_bot(chat_id, media_url, referer_url):
+    """Creates a temporary userbot client to download a file and send it TO THE BOT with a caption."""
     local_filename = media_url.split('/')[-1].split('?')[0]
     if len(local_filename) > 60 or not local_filename:
         file_ext = os.path.splitext(media_url.split('/')[-1].split('?')[0])[1]
@@ -41,8 +40,9 @@ async def process_and_forward_item(app, context, chat_id, media_url, referer_url
     temp_dir = tempfile.gettempdir()
     full_path = os.path.join(temp_dir, local_filename)
 
+    app = PyrogramClient("userbot_session", api_id=API_ID, api_hash=API_HASH, session_string=USERBOT_SESSION_STRING)
+
     try:
-        # 1. Download the file locally
         logger.info(f"Downloading {media_url}...")
         headers = {'Referer': referer_url}
         with requests.get(media_url, headers=headers, stream=True) as r:
@@ -53,62 +53,46 @@ async def process_and_forward_item(app, context, chat_id, media_url, referer_url
 
         is_video = any(ext in full_path.lower() for ext in ['.mp4', '.mov', '.webm'])
         
-        # 2. Upload the file to "Saved Messages" using the userbot
-        sent_message = None
-        while True:
-            try:
-                logger.info(f"Uploading {full_path} to Saved Messages...")
-                if is_video:
-                    sent_message = await app.send_video("me", full_path)
-                else:
-                    sent_message = await app.send_photo("me", full_path)
-                logger.info("Upload to Saved Messages successful.")
-                break 
-            except FloodWait as e:
-                logger.warning(f"FloodWait received. Sleeping for {e.value + 5} seconds.")
-                await asyncio.sleep(e.value + 5)
-        
-        # 3. Use the MAIN BOT to forward the message to the user
-        if sent_message:
-            logger.info(f"Forwarding message {sent_message.id} to user {chat_id}...")
-            await context.bot.forward_message(
-                chat_id=chat_id,
-                from_chat_id=sent_message.chat.id,
-                message_id=sent_message.id
-            )
-            
-            # 4. Clean up by deleting the message from Saved Messages
-            await sent_message.delete()
+        # This caption contains the routing information for the main bot
+        caption = f"FORWARD_TO::{chat_id}"
 
+        async with app:
+            while True:
+                try:
+                    logger.info(f"Uploading {full_path} to the bot {BOT_USERNAME}...")
+                    if is_video:
+                        await app.send_video(BOT_USERNAME, full_path, caption=caption)
+                    else:
+                        await app.send_photo(BOT_USERNAME, full_path, caption=caption)
+                    logger.info(f"Successfully sent {local_filename} to bot.")
+                    break 
+                except FloodWait as e:
+                    logger.warning(f"FloodWait received. Sleeping for {e.value + 5} seconds.")
+                    await asyncio.sleep(e.value + 5)
     except Exception as e:
-        logger.error(f"Failed to process {media_url}: {e}")
-        await context.bot.send_message(chat_id, f"⚠️ Failed to process file: {media_url.split('/')[-1]}")
+        logger.error(f"Failed to process and upload to bot: {e}")
     finally:
         if os.path.exists(full_path):
             os.remove(full_path)
 
-# --- MAIN BOT (PTB) LOGIC ---
+# --- MAIN BOT LOGIC ---
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Hello! Send me a link to an album or a single media page.")
+    await update.message.reply_text("👋 Hello! Send me a link.")
 
 async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     initial_url = update.message.text.strip()
     chat_id = update.message.chat.id
-    
     await update.message.reply_text("✅ Link received. Scraping...")
-
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
         response = requests.get(initial_url, headers=headers)
         response.raise_for_status()
-
         soup = BeautifulSoup(response.text, 'html.parser')
         thumbnail_links = soup.select("a.spotlight[data-media]")
-
         if not thumbnail_links:
             await update.message.reply_text("❌ Could not find any media thumbnails.")
             return
-            
         media_urls = []
         for link in thumbnail_links:
             media_type = link.get('data-media')
@@ -118,48 +102,42 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif media_type == 'image':
                 url = link.get('href')
                 if url: media_urls.append(url)
-        
         if not media_urls:
             await update.message.reply_text("Found thumbnails, but no media links.")
             return
-
         media_urls = sorted(list(set(media_urls)))
-
-        await update.message.reply_text(f"👍 Found {len(media_urls)} files. Starting batch upload session...")
-
-        app = PyrogramClient(
-            "userbot_session",
-            api_id=API_ID,
-            api_hash=API_HASH,
-            session_string=USERBOT_SESSION_STRING
-        )
-        async with app:
-            tasks = [process_and_forward_item(app, context, chat_id, media_url, initial_url) for media_url in media_urls]
-            await asyncio.gather(*tasks)
-        
-        await update.message.reply_text("✅ All tasks complete.")
-
+        await update.message.reply_text(f"👍 Found {len(media_urls)} files. Processing will begin shortly...")
+        tasks = [upload_to_bot(chat_id, media_url, initial_url) for media_url in media_urls]
+        await asyncio.gather(*tasks)
+        await update.message.reply_text("✅ All tasks dispatched.")
     except Exception as e:
         logger.error(f"Manager error: {e}", exc_info=True)
         await context.bot.send_message(chat_id, f"An error occurred: {type(e).__name__}")
 
+async def forwarder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """This handler listens for files sent from the userbot and forwards them."""
+    if not update.message.caption or not update.message.caption.startswith("FORWARD_TO::"):
+        return
+    
+    try:
+        destination_chat_id = int(update.message.caption.split("::")[1])
+        logger.info(f"Received file from userbot, forwarding to {destination_chat_id}")
+        await update.message.forward(chat_id=destination_chat_id)
+    except Exception as e:
+        logger.error(f"Failed to forward message: {e}")
+
 # --- Keep-Alive Server and Main Runner ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/plain')
-        self.end_headers()
-        self.wfile.write(b"ok")
+        self.send_response(200); self.send_header('Content-type', 'text/plain'); self.end_headers(); self.wfile.write(b"ok")
 
 def run_web_server():
-    port = int(os.environ.get("PORT", 10000))
-    server_address = ('', port)
+    port = int(os.environ.get("PORT", 10000)); server_address = ('', port)
     httpd = HTTPServer(server_address, HealthCheckHandler)
-    logger.info(f"Keep-alive server running on port {port}")
-    httpd.serve_forever()
+    logger.info(f"Keep-alive server running on port {port}"); httpd.serve_forever()
 
 def main():
-    if not all([TELEGRAM_BOT_TOKEN, API_ID, API_HASH, USERBOT_SESSION_STRING]):
+    if not all([TELEGRAM_BOT_TOKEN, API_ID, API_HASH, USERBOT_SESSION_STRING, BOT_USERNAME, USERBOT_USER_ID]):
         raise ValueError("One or more required environment variables are missing!")
 
     web_thread = Thread(target=run_web_server, daemon=True)
@@ -167,10 +145,17 @@ def main():
 
     request = HTTPXRequest(connect_timeout=10.0, read_timeout=30.0)
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).request(request).build()
+    
+    # Handler for user commands
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_url))
     
-    print("Definitive Bot is running...")
+    # Handler for receiving files from the trusted userbot
+    user_filter = filters.User(user_id=USERBOT_USER_ID)
+    application.add_handler(MessageHandler(filters.PHOTO & user_filter, forwarder_handler))
+    application.add_handler(MessageHandler(filters.VIDEO & user_filter, forwarder_handler))
+    
+    print("Definitive Relay Bot is running...")
     application.run_polling()
 
 if __name__ == '__main__':
