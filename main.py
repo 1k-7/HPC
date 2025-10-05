@@ -27,9 +27,12 @@ USERBOT_SESSION_STRING = os.environ.get("USERBOT_SESSION_STRING")
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- UPLOADER FUNCTION with FloodWait Handling ---
-async def download_and_upload_item(app, chat_id, media_url, referer_url):
-    """Downloads a single file and uploads it using the provided, active Pyrogram client."""
+# --- UPLOADER FUNCTION with Correct Forwarding Logic ---
+async def process_and_forward_item(app, context, chat_id, media_url, referer_url):
+    """
+    Downloads a file, uploads it to 'Saved Messages' via userbot,
+    and then has the main bot forward it to the user.
+    """
     local_filename = media_url.split('/')[-1].split('?')[0]
     if len(local_filename) > 60 or not local_filename:
         file_ext = os.path.splitext(media_url.split('/')[-1].split('?')[0])[1]
@@ -39,6 +42,7 @@ async def download_and_upload_item(app, chat_id, media_url, referer_url):
     full_path = os.path.join(temp_dir, local_filename)
 
     try:
+        # 1. Download the file locally
         logger.info(f"Downloading {media_url}...")
         headers = {'Referer': referer_url}
         with requests.get(media_url, headers=headers, stream=True) as r:
@@ -49,23 +53,36 @@ async def download_and_upload_item(app, chat_id, media_url, referer_url):
 
         is_video = any(ext in full_path.lower() for ext in ['.mp4', '.mov', '.webm'])
         
-        # --- NEW: FloodWait Handling and Retry Logic ---
+        # 2. Upload the file to "Saved Messages" using the userbot
+        sent_message = None
         while True:
             try:
-                logger.info(f"Uploading {full_path} to user {chat_id}...")
+                logger.info(f"Uploading {full_path} to Saved Messages...")
                 if is_video:
-                    await app.send_video(chat_id, full_path)
+                    sent_message = await app.send_video("me", full_path)
                 else:
-                    await app.send_photo(chat_id, full_path)
-                logger.info(f"Successfully sent {local_filename}.")
-                break # Exit the loop on success
+                    sent_message = await app.send_photo("me", full_path)
+                logger.info("Upload to Saved Messages successful.")
+                break 
             except FloodWait as e:
-                logger.warning(f"FloodWait received. Sleeping for {e.value} seconds.")
-                await asyncio.sleep(e.value + 5) # Sleep for the required time + a buffer
-        # --- END OF NEW LOGIC ---
+                logger.warning(f"FloodWait received. Sleeping for {e.value + 5} seconds.")
+                await asyncio.sleep(e.value + 5)
+        
+        # 3. Use the MAIN BOT to forward the message to the user
+        if sent_message:
+            logger.info(f"Forwarding message {sent_message.id} to user {chat_id}...")
+            await context.bot.forward_message(
+                chat_id=chat_id,
+                from_chat_id=sent_message.chat.id,
+                message_id=sent_message.id
+            )
+            
+            # 4. Clean up by deleting the message from Saved Messages
+            await sent_message.delete()
 
     except Exception as e:
         logger.error(f"Failed to process {media_url}: {e}")
+        await context.bot.send_message(chat_id, f"⚠️ Failed to process file: {media_url.split('/')[-1]}")
     finally:
         if os.path.exists(full_path):
             os.remove(full_path)
@@ -110,8 +127,6 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(f"👍 Found {len(media_urls)} files. Starting batch upload session...")
 
-        # --- NEW: Batch Processing Logic ---
-        # Create one userbot client for the entire batch of files
         app = PyrogramClient(
             "userbot_session",
             api_id=API_ID,
@@ -119,10 +134,8 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             session_string=USERBOT_SESSION_STRING
         )
         async with app:
-            # Create a list of tasks to run concurrently
-            tasks = [download_and_upload_item(app, chat_id, media_url, initial_url) for media_url in media_urls]
+            tasks = [process_and_forward_item(app, context, chat_id, media_url, initial_url) for media_url in media_urls]
             await asyncio.gather(*tasks)
-        # --- END OF NEW LOGIC ---
         
         await update.message.reply_text("✅ All tasks complete.")
 
@@ -157,7 +170,7 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_url))
     
-    print("Batch Processing Bot is running...")
+    print("Definitive Bot is running...")
     application.run_polling()
 
 if __name__ == '__main__':
