@@ -22,8 +22,8 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 USERBOT_SESSION_STRING = os.environ.get("USERBOT_SESSION_STRING")
-BOT_USERNAME = os.environ.get("BOT_USERNAME") # e.g., "@MyDownloaderBot"
-USERBOT_USER_ID = int(os.environ.get("USERBOT_USER_ID")) # Your numerical Telegram ID
+BOT_USERNAME = os.environ.get("BOT_USERNAME")
+USERBOT_USER_ID = int(os.environ.get("USERBOT_USER_ID"))
 
 # --- Setup Logging ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -52,9 +52,7 @@ async def upload_to_bot(chat_id, media_url, referer_url):
                     f.write(chunk)
 
         is_video = any(ext in full_path.lower() for ext in ['.mp4', '.mov', '.webm'])
-        
-        # This caption contains the routing information for the main bot
-        caption = f"FORWARD_TO::{chat_id}"
+        caption = f"SEND_TO::{chat_id}"
 
         async with app:
             while True:
@@ -64,7 +62,7 @@ async def upload_to_bot(chat_id, media_url, referer_url):
                         await app.send_video(BOT_USERNAME, full_path, caption=caption)
                     else:
                         await app.send_photo(BOT_USERNAME, full_path, caption=caption)
-                    logger.info(f"Successfully sent {local_filename} to bot.")
+                    logger.info(f"Successfully sent {local_filename} to bot for processing.")
                     break 
                 except FloodWait as e:
                     logger.warning(f"FloodWait received. Sleeping for {e.value + 5} seconds.")
@@ -76,7 +74,6 @@ async def upload_to_bot(chat_id, media_url, referer_url):
             os.remove(full_path)
 
 # --- MAIN BOT LOGIC ---
-
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 Hello! Send me a link.")
 
@@ -109,22 +106,30 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"👍 Found {len(media_urls)} files. Processing will begin shortly...")
         tasks = [upload_to_bot(chat_id, media_url, initial_url) for media_url in media_urls]
         await asyncio.gather(*tasks)
-        await update.message.reply_text("✅ All tasks dispatched.")
+        await update.message.reply_text("✅ All tasks dispatched. Files will be sent as they are processed.")
     except Exception as e:
         logger.error(f"Manager error: {e}", exc_info=True)
         await context.bot.send_message(chat_id, f"An error occurred: {type(e).__name__}")
 
-async def forwarder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """This handler listens for files sent from the userbot and forwards them."""
-    if not update.message.caption or not update.message.caption.startswith("FORWARD_TO::"):
+# --- NEW: File ID Handler ---
+async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """This handler receives files from the userbot and re-sends them cleanly to the user."""
+    if not update.message.caption or not update.message.caption.startswith("SEND_TO::"):
         return
     
     try:
         destination_chat_id = int(update.message.caption.split("::")[1])
-        logger.info(f"Received file from userbot, forwarding to {destination_chat_id}")
-        await update.message.forward(chat_id=destination_chat_id)
+        logger.info(f"Received file from userbot, re-sending to {destination_chat_id}")
+        
+        if update.message.video:
+            file_id = update.message.video.file_id
+            await context.bot.send_video(chat_id=destination_chat_id, video=file_id)
+        elif update.message.photo:
+            file_id = update.message.photo[-1].file_id # Get the highest resolution photo
+            await context.bot.send_photo(chat_id=destination_chat_id, photo=file_id)
+            
     except Exception as e:
-        logger.error(f"Failed to forward message: {e}")
+        logger.error(f"Failed to re-send message: {e}")
 
 # --- Keep-Alive Server and Main Runner ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -152,8 +157,8 @@ def main():
     
     # Handler for receiving files from the trusted userbot
     user_filter = filters.User(user_id=USERBOT_USER_ID)
-    application.add_handler(MessageHandler(filters.PHOTO & user_filter, forwarder_handler))
-    application.add_handler(MessageHandler(filters.VIDEO & user_filter, forwarder_handler))
+    application.add_handler(MessageHandler(filters.PHOTO & user_filter, file_handler))
+    application.add_handler(MessageHandler(filters.VIDEO & user_filter, file_handler))
     
     print("Definitive Relay Bot is running...")
     application.run_polling()
