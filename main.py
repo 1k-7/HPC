@@ -8,12 +8,12 @@ from bs4 import BeautifulSoup
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
 
-# Telegram (PTB) imports for the main bot
+# Telegram (PTB) imports
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.request import HTTPXRequest
 
-# Pyrogram imports for the userbot
+# Pyrogram imports
 from pyrogram import Client as PyrogramClient
 from pyrogram.errors import FloodWait
 
@@ -25,55 +25,62 @@ USERBOT_SESSION_STRING = os.environ.get("USERBOT_SESSION_STRING")
 BOT_USERNAME = os.environ.get("BOT_USERNAME")
 USERBOT_USER_ID = int(os.environ.get("USERBOT_USER_ID"))
 
+# --- NEW: Concurrency Limiter ---
+# Sets how many files to download/upload at the same time.
+# 4 is a safe number for Render's free tier.
+CONCURRENCY_LIMIT = 4
+
 # --- Setup Logging ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- ON-DEMAND UPLOADER (sends to the bot) ---
-async def upload_to_bot(chat_id, media_url, referer_url):
-    """Creates a temporary userbot client to download a file and send it TO THE BOT with a caption."""
-    local_filename = media_url.split('/')[-1].split('?')[0]
-    if len(local_filename) > 60 or not local_filename:
-        file_ext = os.path.splitext(media_url.split('/')[-1].split('?')[0])[1]
-        local_filename = f"temp_media{file_ext}" if file_ext else "temp_media"
-    
-    temp_dir = tempfile.gettempdir()
-    full_path = os.path.join(temp_dir, local_filename)
+# --- UPLOADER FUNCTION (now with Semaphore) ---
+async def process_item_task(semaphore, context, chat_id, media_url, referer_url):
+    """Acquires a semaphore lock, then downloads, uploads, and forwards a single file."""
+    async with semaphore:
+        local_filename = media_url.split('/')[-1].split('?')[0]
+        if len(local_filename) > 60 or not local_filename:
+            file_ext = os.path.splitext(media_url.split('/')[-1].split('?')[0])[1]
+            local_filename = f"temp_media{file_ext}" if file_ext else "temp_media"
+        
+        temp_dir = tempfile.gettempdir()
+        full_path = os.path.join(temp_dir, local_filename)
 
-    app = PyrogramClient("userbot_session", api_id=API_ID, api_hash=API_HASH, session_string=USERBOT_SESSION_STRING)
+        app = PyrogramClient("userbot_session", api_id=API_ID, api_hash=API_HASH, session_string=USERBOT_SESSION_STRING)
 
-    try:
-        logger.info(f"Downloading {media_url}...")
-        headers = {'Referer': referer_url}
-        with requests.get(media_url, headers=headers, stream=True) as r:
-            r.raise_for_status()
-            with open(full_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
+        try:
+            logger.info(f"Downloading {media_url}...")
+            headers = {'Referer': referer_url}
+            with requests.get(media_url, headers=headers, stream=True) as r:
+                r.raise_for_status()
+                with open(full_path, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
 
-        is_video = any(ext in full_path.lower() for ext in ['.mp4', '.mov', '.webm'])
-        caption = f"SEND_TO::{chat_id}"
+            is_video = any(ext in full_path.lower() for ext in ['.mp4', '.mov', '.webm'])
+            caption = f"FORWARD_TO::{chat_id}"
 
-        async with app:
-            while True:
-                try:
-                    logger.info(f"Uploading {full_path} to the bot {BOT_USERNAME}...")
-                    if is_video:
-                        await app.send_video(BOT_USERNAME, full_path, caption=caption)
-                    else:
-                        await app.send_photo(BOT_USERNAME, full_path, caption=caption)
-                    logger.info(f"Successfully sent {local_filename} to bot for processing.")
-                    break 
-                except FloodWait as e:
-                    logger.warning(f"FloodWait received. Sleeping for {e.value + 5} seconds.")
-                    await asyncio.sleep(e.value + 5)
-    except Exception as e:
-        logger.error(f"Failed to process and upload to bot: {e}")
-    finally:
-        if os.path.exists(full_path):
-            os.remove(full_path)
+            async with app:
+                while True:
+                    try:
+                        logger.info(f"Uploading {full_path} to the bot {BOT_USERNAME}...")
+                        if is_video:
+                            sent_message = await app.send_video(BOT_USERNAME, full_path, caption=caption)
+                        else:
+                            sent_message = await app.send_photo(BOT_USERNAME, full_path, caption=caption)
+                        logger.info(f"Successfully sent {local_filename} to bot for relay.")
+                        break 
+                    except FloodWait as e:
+                        logger.warning(f"FloodWait received. Sleeping for {e.value + 5} seconds.")
+                        await asyncio.sleep(e.value + 5)
+        except Exception as e:
+            logger.error(f"Failed to process and upload to bot: {e}")
+            await context.bot.send_message(chat_id, f"⚠️ Failed to process file: {local_filename}")
+        finally:
+            if os.path.exists(full_path):
+                os.remove(full_path)
 
-# --- MAIN BOT LOGIC ---
+# --- MAIN BOT (PTB) LOGIC ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 Hello! Send me a link.")
 
@@ -102,19 +109,23 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not media_urls:
             await update.message.reply_text("Found thumbnails, but no media links.")
             return
+
         media_urls = sorted(list(set(media_urls)))
-        await update.message.reply_text(f"👍 Found {len(media_urls)} files. Processing will begin shortly...")
-        tasks = [upload_to_bot(chat_id, media_url, initial_url) for media_url in media_urls]
+        await update.message.reply_text(f"👍 Found {len(media_urls)} files. Processing in batches...")
+
+        # --- NEW: Create semaphore and run tasks in a controlled manner ---
+        semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
+        tasks = [process_item_task(semaphore, context, chat_id, media_url, initial_url) for media_url in media_urls]
         await asyncio.gather(*tasks)
-        await update.message.reply_text("✅ All tasks dispatched. Files will be sent as they are processed.")
+        
+        await update.message.reply_text("✅ All files processed.")
     except Exception as e:
         logger.error(f"Manager error: {e}", exc_info=True)
         await context.bot.send_message(chat_id, f"An error occurred: {type(e).__name__}")
 
-# --- NEW: File ID Handler ---
-async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def forwarder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """This handler receives files from the userbot and re-sends them cleanly to the user."""
-    if not update.message.caption or not update.message.caption.startswith("SEND_TO::"):
+    if not update.message.caption or not update.message.caption.startswith("FORWARD_TO::"):
         return
     
     try:
@@ -122,11 +133,9 @@ async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"Received file from userbot, re-sending to {destination_chat_id}")
         
         if update.message.video:
-            file_id = update.message.video.file_id
-            await context.bot.send_video(chat_id=destination_chat_id, video=file_id)
+            await context.bot.send_video(chat_id=destination_chat_id, video=update.message.video.file_id)
         elif update.message.photo:
-            file_id = update.message.photo[-1].file_id # Get the highest resolution photo
-            await context.bot.send_photo(chat_id=destination_chat_id, photo=file_id)
+            await context.bot.send_photo(chat_id=destination_chat_id, photo=update.message.photo[-1].file_id)
             
     except Exception as e:
         logger.error(f"Failed to re-send message: {e}")
@@ -151,16 +160,14 @@ def main():
     request = HTTPXRequest(connect_timeout=10.0, read_timeout=30.0)
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).request(request).build()
     
-    # Handler for user commands
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_url))
     
-    # Handler for receiving files from the trusted userbot
     user_filter = filters.User(user_id=USERBOT_USER_ID)
-    application.add_handler(MessageHandler(filters.PHOTO & user_filter, file_handler))
-    application.add_handler(MessageHandler(filters.VIDEO & user_filter, file_handler))
+    application.add_handler(MessageHandler(filters.PHOTO & user_filter, forwarder_handler))
+    application.add_handler(MessageHandler(filters.VIDEO & user_filter, forwarder_handler))
     
-    print("Definitive Relay Bot is running...")
+    print("Stable Batch Bot is running...")
     application.run_polling()
 
 if __name__ == '__main__':
