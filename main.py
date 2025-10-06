@@ -56,6 +56,10 @@ async def process_single_file(ptb_bot_instance: Bot, user_id: int, media_url: st
         async with PyrogramClient("userbot_session", api_id=API_ID, api_hash=API_HASH, session_string=USERBOT_SESSION_STRING) as userbot:
             sent_msg = await userbot.send_video("me", full_path) if is_video else await userbot.send_photo("me", full_path)
             await ptb_bot_instance.forward_message(chat_id=target_chat_id, from_chat_id=sent_msg.chat.id, message_id=sent_msg.id)
+            
+            # --- FIX: Added a small delay to prevent a race condition ---
+            await asyncio.sleep(1) 
+            
             await sent_msg.delete()
         
         database.update_stats('videos_sent' if is_video else 'images_sent')
@@ -146,7 +150,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Failed to process link {url} in normal mode: {e}")
             await update.message.reply_text(f"⚠️ Failed to process link: {url}")
             
-# --- Admin, Stats, and Other Handlers (Copied from previous version) ---
+# --- Admin, Stats, and Other Handlers ---
 async def target_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         target_id = int(context.args[0]); database.set_user_target(update.effective_user.id, target_id)
@@ -233,39 +237,28 @@ async def main():
     application.add_handler(CommandHandler("ce", clear_queue_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(check_and_send_stats, 'interval', minutes=15, args=[application.bot])
+    scheduler = AsyncIOScheduler(); scheduler.add_job(check_and_send_stats, 'interval', minutes=15, args=[application.bot]);
     
-    # The `async with` statement will guarantee that `application.initialize()` and `application.shutdown()` are called.
     async with application:
         scheduler.start()
         worker_task = asyncio.create_task(frenzy_worker_loop(application.bot))
-
+        
         logger.info("Main bot, scheduler, and worker loop are starting concurrently.")
         
-        # Start the bot
         await application.start()
         await application.updater.start_polling(drop_pending_updates=True)
-
+        
         try:
-            # Keep the script running until a KeyboardInterrupt is received
-            await asyncio.Future()
-        except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
-            logger.info("Shutdown signal received.")
+            await asyncio.Future() # Keep running indefinitely
+        except (KeyboardInterrupt, SystemExit):
+            pass
         finally:
-            logger.info("Stopping background tasks...")
-            if scheduler.running:
-                scheduler.shutdown()
             if worker_task:
                 worker_task.cancel()
-                # Wait for the task to be cancelled
-                await asyncio.sleep(1)
-            logger.info("Background tasks stopped.")
-            # `async with` will handle stopping the updater and the application
+            if scheduler.running:
+                scheduler.shutdown()
+
 
 if __name__ == '__main__':
     print("Starting Dual-Mode Bot...")
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Process interrupted by user.")
+    asyncio.run(main())
