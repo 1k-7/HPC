@@ -26,6 +26,9 @@ API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 USERBOT_SESSION_STRING = os.environ.get("USERBOT_SESSION_STRING")
 ADMIN_IDS = [int(admin_id) for admin_id in os.environ.get("ADMIN_IDS", "").split()]
+# --- NEW REQUIRED VARS ---
+BOT_USERNAME = os.environ.get("BOT_USERNAME") # e.g. @MyAwesomeBot
+USERBOT_USER_ID = int(os.environ.get("USERBOT_USER_ID")) # The user ID of your userbot
 
 # --- Setup Logging ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -35,9 +38,12 @@ logger = logging.getLogger(__name__)
 last_sent_stats = {}
 admin_filter = filters.User(user_id=ADMIN_IDS)
 
-# --- Reusable Core Task Logic ---
-async def process_single_file(ptb_bot_instance: Bot, user_id: int, media_url: str, referer_url: str):
-    """The core logic for downloading, uploading, and forwarding a single file."""
+# --- REVISED CORE TASK LOGIC (FROM HPC-SAVE) ---
+async def process_single_file(user_id: int, media_url: str, referer_url: str):
+    """
+    Downloads a file and sends it to the main bot via Pyrogram userbot,
+    with the final destination in the caption for relay.
+    """
     full_path = ""
     try:
         user_config = database.get_user_config(user_id) or {}
@@ -45,43 +51,75 @@ async def process_single_file(ptb_bot_instance: Bot, user_id: int, media_url: st
 
         local_filename = f"temp_{os.path.basename(requests.utils.urlparse(media_url).path)}"
         temp_dir = tempfile.gettempdir(); full_path = os.path.join(temp_dir, local_filename)
+
+        logger.info(f"Downloading {media_url} for user {user_id}")
         headers = {'Referer': referer_url}
         with requests.get(media_url, headers=headers, stream=True) as r:
-            r.raise_for_status();
+            r.raise_for_status()
             with open(full_path, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192): f.write(chunk)
-        
+
         is_video = any(ext in full_path.lower() for ext in ['.mp4', '.mov', '.webm'])
-        
+        caption = f"FORWARD_TO::{target_chat_id}"
+
         async with PyrogramClient("userbot_session", api_id=API_ID, api_hash=API_HASH, session_string=USERBOT_SESSION_STRING) as userbot:
-            sent_msg = await userbot.send_video("me", full_path) if is_video else await userbot.send_photo("me", full_path)
-            await ptb_bot_instance.forward_message(chat_id=target_chat_id, from_chat_id=sent_msg.chat.id, message_id=sent_msg.id)
-            
-            # --- FIX: Added a small delay to prevent a race condition ---
-            await asyncio.sleep(1) 
-            
-            await sent_msg.delete()
-        
-        database.update_stats('videos_sent' if is_video else 'images_sent')
-        
+            while True:
+                try:
+                    logger.info(f"Uploading {local_filename} to bot {BOT_USERNAME} for relay to {target_chat_id}...")
+                    if is_video:
+                        await userbot.send_video(BOT_USERNAME, full_path, caption=caption)
+                    else:
+                        await userbot.send_photo(BOT_USERNAME, full_path, caption=caption)
+                    logger.info(f"Successfully sent {local_filename} to bot for relay.")
+                    database.update_stats('videos_sent' if is_video else 'images_sent')
+                    break
+                except FloodWait as e:
+                    logger.warning(f"FloodWait received. Sleeping for {e.value + 5} seconds.")
+                    await asyncio.sleep(e.value + 5)
+
     except Exception as e:
-        logger.error(f"Failed to process {media_url}: {e}")
-        await log_to_topic(ptb_bot_instance, 'logs', f"🔥 **Processing Error** for user `{user_id}`:\n`{e}`")
+        logger.error(f"Failed to process {media_url} for user {user_id}: {e}")
+        # Optionally, send an error message back to the user via the main bot
+        # This part is tricky as we don't have the 'context' object here.
+        # A more advanced implementation might pass the bot instance around.
     finally:
-        if os.path.exists(full_path): os.remove(full_path)
+        if os.path.exists(full_path):
+            os.remove(full_path)
 
 # --- Background Worker (for Frenzy Mode) ---
-async def frenzy_worker_loop(ptb_bot_instance: Bot):
+async def frenzy_worker_loop():
     logger.info("Frenzy mode background worker started.")
     while True:
         job = database.get_job()
         if job:
-            await process_single_file(ptb_bot_instance, job['user_id'], job['media_url'], job['referer_url'])
+            await process_single_file(job['user_id'], job['media_url'], job['referer_url'])
             database.complete_job(job['_id'])
         else:
             await asyncio.sleep(5)
 
-# --- PTB Handlers ---
+# --- NEW FORWARDER HANDLER (FROM HPC-SAVE) ---
+async def forwarder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    This handler receives files from the userbot and re-sends them cleanly to the user.
+    It only activates for messages sent by the userbot.
+    """
+    if not update.message.caption or not update.message.caption.startswith("FORWARD_TO::"):
+        return
+
+    try:
+        destination_chat_id = int(update.message.caption.split("::")[1])
+        logger.info(f"Received file from userbot, re-sending to {destination_chat_id}")
+
+        if update.message.video:
+            await context.bot.send_video(chat_id=destination_chat_id, video=update.message.video.file_id)
+        elif update.message.photo:
+            # Send the highest quality photo
+            await context.bot.send_photo(chat_id=destination_chat_id, photo=update.message.photo[-1].file_id)
+
+    except Exception as e:
+        logger.error(f"Failed to re-send message from userbot: {e}")
+
+# --- PTB Handlers (largely unchanged) ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     database.set_frenzy_mode(user.id, False) # Default to Normal Mode
@@ -99,58 +137,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_config = database.get_user_config(user_id)
     is_in_frenzy = user_config.get("frenzy_mode_active", False)
-    
+
     text = update.message.text
     urls = re.findall(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', text)
     if not urls: return
 
-    if is_in_frenzy:
-        # FRENZY MODE: Scrape and add to DB queue
-        await update.message.reply_text(f"Frenzy Mode: Found {len(urls)} links. Scraping and adding to background queue...")
-        scraped_count = 0
-        for url in urls:
-            try:
-                headers = {'User-Agent': 'Mozilla/5.0 ...'}
-                response = requests.get(url, headers=headers)
-                soup = BeautifulSoup(response.text, 'html.parser')
-                thumbnail_links = soup.select("a.spotlight[data-media]")
-                for link in thumbnail_links:
-                    media_url = link.get('data-src-mp4') if link.get('data-media') == 'video' else link.get('href')
-                    if media_url:
-                        database.add_job(user_id, media_url, url); scraped_count += 1
-            except Exception as e:
-                logger.error(f"Failed to scrape {url}: {e}")
-        await update.message.reply_text(f"✅ Queued {scraped_count} media files. The worker will process them in the background.")
-    else:
-        # NORMAL MODE: Block and process the first link now
-        url = urls[0]
-        await update.message.reply_text(f"Normal Mode: Processing link: `{url}`. Please wait...")
+    # --- Scrape logic is now shared ---
+    scraped_media = []
+    await update.message.reply_text(f"Found {len(urls)} link(s). Scraping for media...")
+    for url in urls:
         try:
             headers = {'User-Agent': 'Mozilla/5.0 ...'}
             response = requests.get(url, headers=headers)
             soup = BeautifulSoup(response.text, 'html.parser')
             thumbnail_links = soup.select("a.spotlight[data-media]")
-            
-            media_to_process = []
             for link in thumbnail_links:
                 media_url = link.get('data-src-mp4') if link.get('data-media') == 'video' else link.get('href')
                 if media_url:
-                    media_to_process.append(media_url)
-            
-            if not media_to_process:
-                await update.message.reply_text("Could not find any media on that page.")
-                return
-
-            await update.message.reply_text(f"Found {len(media_to_process)} files. Processing now...")
-            tasks = [process_single_file(context.bot, user_id, media_url, url) for media_url in media_to_process]
-            await asyncio.gather(*tasks)
-            await update.message.reply_text("✅ Task complete.")
-
+                    scraped_media.append((media_url, url)) # Store with its referer
         except Exception as e:
-            logger.error(f"Failed to process link {url} in normal mode: {e}")
-            await update.message.reply_text(f"⚠️ Failed to process link: {url}")
-            
-# --- Admin, Stats, and Other Handlers ---
+            logger.error(f"Failed to scrape {url}: {e}")
+
+    if not scraped_media:
+        await update.message.reply_text("Could not find any media on the page(s).")
+        return
+
+    if is_in_frenzy:
+        for media_url, referer_url in scraped_media:
+            database.add_job(user_id, media_url, referer_url)
+        await update.message.reply_text(f"✅ Queued {len(scraped_media)} media files. The worker will process them in the background.")
+    else:
+        # NORMAL MODE: Block and process now
+        await update.message.reply_text(f"Found {len(scraped_media)} files. Processing now, please wait...")
+        tasks = [process_single_file(user_id, media_url, referer_url) for media_url, referer_url in scraped_media]
+        await asyncio.gather(*tasks)
+        await update.message.reply_text("✅ Task complete.")
+
+# --- Admin, Stats, and Other Handlers (Unchanged) ---
 async def target_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         target_id = int(context.args[0]); database.set_user_target(update.effective_user.id, target_id)
@@ -186,10 +209,9 @@ async def set_supergroup_command(update: Update, context: ContextTypes.DEFAULT_T
     except Exception as e:
         await update.message.reply_text(f"Error: {e}.")
 async def check_and_send_stats(bot: Bot):
-    global last_sent_stats
-    current_stats = database.get_stats()
+    global last_sent_stats; current_stats = database.get_stats()
     if current_stats and current_stats != last_sent_stats:
-        settings = database.get_settings()
+        settings = database.get_settings();
         if not settings: return
         stats_message = "📊 **Bot Stats**\n\n";
         for key, value in current_stats.items():
@@ -201,10 +223,8 @@ async def log_to_topic(bot: Bot, topic_key: str, text: str):
     if settings and 'supergroup_id' in settings:
         topic_ids = settings.get('topic_ids', {})
         if topic_key in topic_ids:
-            try:
-                await bot.send_message(chat_id=settings['supergroup_id'], message_thread_id=topic_ids[topic_key], text=text, parse_mode='Markdown')
+            try: await bot.send_message(chat_id=settings['supergroup_id'], message_thread_id=topic_ids[topic_key], text=text, parse_mode='Markdown')
             except Exception as e: logger.error(f"Failed to log to topic '{topic_key}': {e}")
-
 
 # --- Keep-Alive Server and Main Runner ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -216,15 +236,13 @@ def run_web_server():
     logger.info(f"Keep-alive server on port {port}"); httpd.serve_forever()
 
 async def main():
-    if not all([TELEGRAM_BOT_TOKEN, API_ID, API_HASH, USERBOT_SESSION_STRING, ADMIN_IDS]):
-        raise ValueError("Core environment variables are missing!")
+    if not all([TELEGRAM_BOT_TOKEN, API_ID, API_HASH, USERBOT_SESSION_STRING, ADMIN_IDS, BOT_USERNAME, USERBOT_USER_ID]):
+        raise ValueError("One or more required environment variables are missing!")
 
-    web_thread = Thread(target=run_web_server, daemon=True)
-    web_thread.start()
-
+    web_thread = Thread(target=run_web_server, daemon=True); web_thread.start()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    
-    # Add all handlers
+
+    # --- Add all command handlers ---
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("setsupergroup", set_supergroup_command, filters=admin_filter))
     application.add_handler(CommandHandler("frenzy", frenzy_command))
@@ -235,30 +253,32 @@ async def main():
     application.add_handler(CommandHandler("tasks", tasks_command))
     application.add_handler(CommandHandler("cc", clear_queue_command))
     application.add_handler(CommandHandler("ce", clear_queue_command))
+
+    # --- ADD NEW FORWARDER HANDLER ---
+    user_filter = filters.User(user_id=USERBOT_USER_ID)
+    application.add_handler(MessageHandler(filters.PHOTO & user_filter, forwarder_handler))
+    application.add_handler(MessageHandler(filters.VIDEO & user_filter, forwarder_handler))
+
+    # --- Add general message handler (must be last) ---
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
+
     scheduler = AsyncIOScheduler(); scheduler.add_job(check_and_send_stats, 'interval', minutes=15, args=[application.bot]);
-    
+
     async with application:
         scheduler.start()
-        worker_task = asyncio.create_task(frenzy_worker_loop(application.bot))
-        
+        worker_task = asyncio.create_task(frenzy_worker_loop())
         logger.info("Main bot, scheduler, and worker loop are starting concurrently.")
-        
         await application.start()
         await application.updater.start_polling(drop_pending_updates=True)
-        
         try:
-            await asyncio.Future() # Keep running indefinitely
+            await asyncio.Future()
         except (KeyboardInterrupt, SystemExit):
-            pass
+            logger.info("Shutdown signal received.")
         finally:
-            if worker_task:
-                worker_task.cancel()
-            if scheduler.running:
-                scheduler.shutdown()
-
+            if scheduler.running: scheduler.shutdown()
+            if worker_task: worker_task.cancel(); await asyncio.sleep(1)
 
 if __name__ == '__main__':
-    print("Starting Dual-Mode Bot...")
+    print("Starting Dual-Mode Bot with Stable Forwarding Logic...")
     asyncio.run(main())
+
