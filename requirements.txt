@@ -5,3 +5,4 @@ pyrogram
 tgcrypto
 pymongo[srv]
 apscheduler
+ffmpeg-python
