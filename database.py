@@ -10,6 +10,7 @@ jobs_collection = db['jobs']
 users_collection = db['users']
 stats_collection = db['stats']
 settings_collection = db['settings']
+file_details_collection = db['file_details'] # New collection for fetched files
 
 # --- Settings ---
 def get_settings():
@@ -19,8 +20,8 @@ def set_supergroup(chat_id, topic_ids):
     settings_collection.update_one({"_id": "config"}, {"$set": {"supergroup_id": chat_id, "topic_ids": topic_ids}}, upsert=True)
 
 # --- Job Management ---
-def add_job(user_id, media_url, referer_url):
-    jobs_collection.insert_one({"user_id": user_id, "media_url": media_url, "referer_url": referer_url, "status": "pending", "created_at": datetime.utcnow()})
+def add_job(user_id, media_url, referer_url, task_id):
+    jobs_collection.insert_one({"user_id": user_id, "media_url": media_url, "referer_url": referer_url, "task_id": task_id, "status": "pending", "created_at": datetime.utcnow()})
 
 def get_job():
     return jobs_collection.find_one_and_update({"status": "pending"}, {"$set": {"status": "processing"}}, sort=[("created_at", 1)], return_document=ReturnDocument.AFTER)
@@ -46,7 +47,6 @@ def set_user_target(user_id, target_chat_id):
     users_collection.update_one({"user_id": user_id}, {"$set": {"target_chat_id": target_chat_id}}, upsert=True)
 
 def clear_user_target(user_id):
-    """Removes the custom target chat for a user."""
     users_collection.update_one({"user_id": user_id}, {"$unset": {"target_chat_id": ""}})
 
 # --- Stats ---
@@ -55,3 +55,16 @@ def update_stats(stat_type, count=1):
 
 def get_stats():
     return stats_collection.find_one({"_id": "global_stats"})
+
+# --- NEW: File Fetching Logic ---
+def add_file_detail(task_id, file_id, media_type):
+    """Adds a file's details to the database, associated with a task_id."""
+    file_details_collection.update_one(
+        {"_id": task_id},
+        {"$push": {"files": {"file_id": file_id, "media_type": media_type}}},
+        upsert=True
+    )
+
+def get_file_details(task_id):
+    """Retrieves all file details for a given task_id."""
+    return file_details_collection.find_one({"_id": task_id})
