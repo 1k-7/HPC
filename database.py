@@ -6,7 +6,6 @@ MONGO_URI = os.environ.get("MONGO_URI")
 client = MongoClient(MONGO_URI)
 db = client['frenzy_bot_db']
 
-# Collections
 jobs_collection = db['jobs']
 users_collection = db['users']
 stats_collection = db['stats']
@@ -17,18 +16,14 @@ def get_settings():
     return settings_collection.find_one({"_id": "config"})
 
 def set_supergroup(chat_id, topic_ids):
-    settings_collection.update_one(
-        {"_id": "config"},
-        {"$set": {"supergroup_id": chat_id, "topic_ids": topic_ids}},
-        upsert=True
-    )
+    settings_collection.update_one({"_id": "config"}, {"$set": {"supergroup_id": chat_id, "topic_ids": topic_ids}}, upsert=True)
 
 # --- Job Management ---
 def add_job(user_id, media_url, referer_url):
     jobs_collection.insert_one({"user_id": user_id, "media_url": media_url, "referer_url": referer_url, "status": "pending", "created_at": datetime.utcnow()})
 
 def get_job():
-    return jobs_collection.find_one_and_update({"status": "pending"}, {"$set": {"status": "processing"}}, return_document=ReturnDocument.AFTER)
+    return jobs_collection.find_one_and_update({"status": "pending"}, {"$set": {"status": "processing"}}, sort=[("created_at", 1)], return_document=ReturnDocument.AFTER)
 
 def complete_job(job_id):
     jobs_collection.delete_one({"_id": job_id})
@@ -50,8 +45,9 @@ def set_frenzy_mode(user_id, status: bool):
 def set_user_target(user_id, target_chat_id):
     users_collection.update_one({"user_id": user_id}, {"$set": {"target_chat_id": target_chat_id}}, upsert=True)
 
-def add_worker_token(user_id, token):
-    users_collection.update_one({"user_id": user_id}, {"$push": {"worker_tokens": token}}, upsert=True)
+def clear_user_target(user_id):
+    """Removes the custom target chat for a user."""
+    users_collection.update_one({"user_id": user_id}, {"$unset": {"target_chat_id": ""}})
 
 # --- Stats ---
 def update_stats(stat_type, count=1):
@@ -59,4 +55,3 @@ def update_stats(stat_type, count=1):
 
 def get_stats():
     return stats_collection.find_one({"_id": "global_stats"})
-  
