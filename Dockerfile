@@ -5,7 +5,7 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # --- INSTALL FFMPEG ---
-# This command runs in a writable layer during the image build
+# Update package lists and install ffmpeg
 RUN apt-get update && apt-get install -y ffmpeg
 
 # Copy your Python requirements file
