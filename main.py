@@ -15,6 +15,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Telegram (PTB) imports
 from telegram import Update, Bot
+from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # Pyrogram imports
@@ -48,11 +49,11 @@ def log_user_activity(func):
         user = update.effective_user
         if user and update.message.text.startswith('/'):
             log_message = (
-                f"👤 **User Activity**\n\n"
-                f"**Name:** {user.full_name}\n"
-                f"**Username:** @{user.username}\n"
-                f"**ID:** `{user.id}`\n"
-                f"**Command:** `{update.message.text}`"
+                f"👤 *User Activity*\n\n"
+                f"*Name:* {user.full_name}\n"
+                f"*Username:* @{user.username}\n"
+                f"*ID:* `{user.id}`\n"
+                f"*Command:* `{update.message.text}`"
             )
             await log_to_topic(context.bot, 'user_activity', log_message)
         return await func(update, context, *args, **kwargs)
@@ -139,21 +140,21 @@ async def forwarder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Failed to re-send message: {e}")
 
-# --- PTB Handlers ---
+# --- PTB Handlers (with corrected formatting) ---
 @log_user_activity
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     database.set_frenzy_mode(update.effective_user.id, False)
-    await update.message.reply_text("✨ **System Online.** Ready for links.\nUse `/frenzy` for bulk processing.")
+    await update.message.reply_text("✨ *System Online\.*\nReady for links\. Use `/frenzy` for bulk processing\.", parse_mode=ParseMode.MARKDOWN_V2)
 
 @log_user_activity
 async def frenzy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     database.set_frenzy_mode(update.effective_user.id, True)
-    await update.message.reply_text("⛩️ **Frenzy Mode Engaged.** All submitted links will be added to the queue.")
+    await update.message.reply_text("⛩️ *Frenzy Mode Engaged\.*\nAll submitted links will be added to the queue\.", parse_mode=ParseMode.MARKDOWN_V2)
 
 @log_user_activity
 async def cf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     database.set_frenzy_mode(update.effective_user.id, False)
-    await update.message.reply_text("⚙️ **Normal Mode Engaged.** Processing links one by one, in real-time.")
+    await update.message.reply_text("⚙️ *Normal Mode Engaged\.*\nProcessing links one by one, in real-time\.", parse_mode=ParseMode.MARKDOWN_V2)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -165,7 +166,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     task_id = f"{user_id}_{int(time.time())}"
     scraped_media, scraped_count = [], 0
-    await update.message.reply_text(f"📡 **Scanning {len(urls)} link(s)...**")
+    await update.message.reply_text(f"📡 *Scanning {len(urls)} link(s)\.\.\.*", parse_mode=ParseMode.MARKDOWN_V2)
     for url in urls:
         try:
             response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0 ...'})
@@ -177,46 +178,48 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e: logger.error(f"Failed to scrape {url}: {e}")
 
     if not scraped_media:
-        await update.message.reply_text(" ghostly **Scan Complete.** No valid media found on the page(s)."); return
+        await update.message.reply_text("👻 *Scan Complete\.*\nNo valid media found on the page\(s\)\.", parse_mode=ParseMode.MARKDOWN_V2); return
     
     videos_count = sum(1 for media_url, _ in scraped_media if any(ext in media_url.lower() for ext in ['.mp4', '.mov', '.webm']))
     images_count = len(scraped_media) - videos_count
 
+    # Use MarkdownV2 for logs as well for consistency
     log_message = (
-        f"🔗 **Link Submission**\n\n"
-        f"**User:** {user.full_name} (`{user.id}`)\n"
-        f"**Link(s):**\n" + "\n".join(f"`{u}`" for u in urls) + "\n\n"
-        f"**Media Found:** {scraped_count}\n"
-        + (f"**Videos:** {videos_count}\n" if videos_count > 0 else "")
-        + (f"**Images:** {images_count}\n" if images_count > 0 else "") +
-        f"\n**Fetch Command:** `/fetch_{task_id}`"
+        f"🔗 *Link Submission*\n\n"
+        f"*User:* {user.full_name} (`{user.id}`)\n"
+        f"*Link(s):*\n" + "\n".join(f"`{u}`" for u in urls) + "\n\n"
+        f"*Media Found:* {scraped_count}\n"
+        + (f"*Videos:* {videos_count}\n" if videos_count > 0 else "")
+        + (f"*Images:* {images_count}\n" if images_count > 0 else "") +
+        f"\n*Fetch Command:* `/fetch_{task_id}`"
     )
     await log_to_topic(context.bot, 'user_activity', log_message)
 
     if is_in_frenzy:
         for media_url, referer_url in scraped_media:
             database.add_job(user_id, media_url, referer_url, task_id)
-        await log_to_topic(context.bot, 'jobs', f"💼 Queued {len(scraped_media)} jobs from task `{task_id}` for user `{user_id}`.")
-        await update.message.reply_text(f"⛩️ **Queue Updated.** Added {scraped_count} files to the processing pipeline.")
+        await log_to_topic(context.bot, 'jobs', f"💼 Queued {len(scraped_media)} jobs from task `{task_id}` for user `{user_id}`\.")
+        await update.message.reply_text(f"⛩️ *Queue Updated\.*\nAdded {scraped_count} files to the processing pipeline\.", parse_mode=ParseMode.MARKDOWN_V2)
     else:
-        await update.message.reply_text(f"📥 **Scrape Complete.** Found {scraped_count} files. Initiating transfer...")
+        await update.message.reply_text(f"📥 *Scrape Complete\.*\nFound {scraped_count} files\. Initiating transfer\.\.\.", parse_mode=ParseMode.MARKDOWN_V2)
         semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
         tasks = [process_single_file(semaphore, user_id, media_url, referer_url, task_id) for media_url, referer_url in scraped_media]
         await asyncio.gather(*tasks)
-        await update.message.reply_text(f"✨ **Task `{task_id}` Complete.**")
+        await update.message.reply_text(f"✨ *Task `{task_id}` Complete\.*", parse_mode=ParseMode.MARKDOWN_V2)
 
 @log_user_activity
 async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        task_id = update.message.text.split('_')[1]
-    except IndexError:
-        await update.message.reply_text("🏮 **Invalid Command.** Use the format `/fetch_taskID`."); return
+    # --- FIX: Correctly parse the task ID ---
+    if not update.message.text.startswith('/fetch_'):
+        await update.message.reply_text("🏮 *Invalid Command\.*\nUse the format `/fetch_taskID`\.", parse_mode=ParseMode.MARKDOWN_V2); return
+    
+    task_id = update.message.text[len('/fetch_'):]
 
     details = database.get_file_details(task_id)
     if not details or not details.get('files'):
-        await update.message.reply_text(f" ghostly **Not Found.** No files are associated with task ID `{task_id}`."); return
+        await update.message.reply_text(f"👻 *Not Found\.*\nNo files are associated with task ID `{task_id}`\.", parse_mode=ParseMode.MARKDOWN_V2); return
     
-    await update.message.reply_text(f" Retrieving Archive.** Fetching {len(details['files'])} files for task `{task_id}`...")
+    await update.message.reply_text(f"📦 *Retrieving Archive\.*\nFetching {len(details['files'])} files for task `{task_id}`\.\.\.", parse_mode=ParseMode.MARKDOWN_V2)
     for file in details['files']:
         try:
             if file['media_type'] == 'video':
@@ -225,7 +228,7 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_photo(update.effective_chat.id, file['file_id'])
         except Exception as e:
             logger.error(f"Failed to send file {file['file_id']} for task {task_id}: {e}")
-            await update.message.reply_text(f"🏮 **Delivery Error.** Failed to send one of the files from task `{task_id}`.")
+            await update.message.reply_text(f"🏮 *Delivery Error\.*\nFailed to send one of the files from task `{task_id}`\.", parse_mode=ParseMode.MARKDOWN_V2)
         await asyncio.sleep(1)
 
 @log_user_activity
@@ -233,14 +236,14 @@ async def target_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         target_id = int(context.args[0])
         database.set_user_target(update.effective_user.id, target_id)
-        await update.message.reply_text(f"🎯 **Target Acquired.** All future media will be sent to `{target_id}`.")
+        await update.message.reply_text(f"🎯 *Target Acquired\.*\nAll future media will be sent to `{target_id}`\.", parse_mode=ParseMode.MARKDOWN_V2)
     except (IndexError, ValueError):
-        await update.message.reply_text("🏮 **Syntax Error.** Please use `/target <chat_id>`.")
+        await update.message.reply_text("🏮 *Syntax Error\.*\nPlease use `/target <chat_id>`\.", parse_mode=ParseMode.MARKDOWN_V2)
 
 @log_user_activity
 async def cleartarget_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     database.clear_user_target(update.effective_user.id)
-    await update.message.reply_text("🎯 **Target Cleared.** Media will now be sent to this chat by default.")
+    await update.message.reply_text("🎯 *Target Cleared\.*\nMedia will now be sent to this chat by default\.", parse_mode=ParseMode.MARKDOWN_V2)
 
 @log_user_activity
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -249,47 +252,47 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     frenzy_status = "⛩️ Frenzy (Queued)" if frenzy_mode_active else "⚙️ Normal (Real-time)"
     target_status = user_config.get("target_chat_id", "This Chat")
     await update.message.reply_text(
-        f"📜 **Current Status**\n\n"
-        f"∙ **Mode:** `{frenzy_status}`\n"
-        f"∙ **Destination:** `{target_status}`",
-        parse_mode='Markdown'
+        f"📜 *Current Status*\n\n"
+        f"∙ *Mode:* `{frenzy_status}`\n"
+        f"∙ *Destination:* `{target_status}`",
+        parse_mode=ParseMode.MARKDOWN_V2
     )
 
 @log_user_activity
 async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     jobs = database.get_pending_jobs(update.effective_user.id)
-    await update.message.reply_text(f"⏳ **Queue Status.** There are {len(jobs)} jobs pending.")
+    await update.message.reply_text(f"⏳ *Queue Status\.*\nThere are {len(jobs)} jobs pending\.", parse_mode=ParseMode.MARKDOWN_V2)
 
 @log_user_activity
 async def clear_queue_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     deleted_count = database.clear_pending_jobs(update.effective_user.id)
-    await update.message.reply_text(f"🗑️ **Queue Purged.** Removed {deleted_count} pending jobs.")
+    await update.message.reply_text(f"🗑️ *Queue Purged\.*\nRemoved {deleted_count} pending jobs\.", parse_mode=ParseMode.MARKDOWN_V2)
 
 @log_user_activity
 async def set_supergroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.message.chat
     if not chat.is_forum:
-        await update.message.reply_text("🏮 **Configuration Error.** This command must be used in a supergroup with Topics enabled.")
+        await update.message.reply_text("🏮 *Configuration Error\.*\nThis command must be used in a supergroup with Topics enabled\.", parse_mode=ParseMode.MARKDOWN_V2)
         return
-    await update.message.reply_text("Initializing supergroup integration...")
+    await update.message.reply_text("Initializing supergroup integration\.\.\.", parse_mode=ParseMode.MARKDOWN_V2)
     try:
         topic_names = ["Jobs", "Logs", "User Activity", "Stats"]; topic_ids = {}
         for name in topic_names:
             topic = await context.bot.create_forum_topic(chat_id=chat.id, name=name)
             topic_ids[name.lower().replace(" ", "_")] = topic.message_thread_id
         database.set_supergroup(chat.id, topic_ids)
-        await update.message.reply_text("💠 **Supergroup Linked.** Logging channels are now active.")
+        await update.message.reply_text("💠 *Supergroup Linked\.*\nLogging channels are now active\.", parse_mode=ParseMode.MARKDOWN_V2)
     except Exception as e:
-        await update.message.reply_text(f"🏮 **Setup Failed:** {e}.")
+        await update.message.reply_text(f"🏮 *Setup Failed:* `{e}`", parse_mode=ParseMode.MARKDOWN_V2)
 
 async def check_and_send_stats(bot: Bot):
     global last_sent_stats; current_stats = database.get_stats()
     if current_stats and current_stats != last_sent_stats:
         settings = database.get_settings()
         if not settings: return
-        stats_message = "📊 **Bot Stats**\n\n"
+        stats_message = "📊 *Bot Stats*\n\n"
         for key, value in current_stats.items():
-            if key != '_id': stats_message += f"**{key.replace('_', ' ').title()}**: `{value}`\n"
+            if key != '_id': stats_message += f"*{key.replace('_', ' ').title()}*: `{value}`\n"
         await log_to_topic(bot, 'stats', stats_message)
         last_sent_stats = current_stats; logger.info("Sent stats update.")
 
@@ -298,7 +301,7 @@ async def log_to_topic(bot: Bot, topic_key: str, text: str):
     if settings and 'supergroup_id' in settings:
         topic_ids = settings.get('topic_ids', {})
         if topic_key in topic_ids:
-            try: await bot.send_message(chat_id=settings['supergroup_id'], message_thread_id=topic_ids[topic_key], text=text, parse_mode='Markdown')
+            try: await bot.send_message(chat_id=settings['supergroup_id'], message_thread_id=topic_ids[topic_key], text=text, parse_mode=ParseMode.MARKDOWN_V2)
             except Exception as e: logger.error(f"Failed to log to topic '{topic_key}': {e}")
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
