@@ -2,173 +2,173 @@ import logging
 import asyncio
 import os
 import requests
+import re
 import tempfile
 import json
+import itertools
 from bs4 import BeautifulSoup
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Telegram (PTB) imports
-from telegram import Update
+from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from telegram.request import HTTPXRequest
 
 # Pyrogram imports
 from pyrogram import Client as PyrogramClient
 from pyrogram.errors import FloodWait
 
-# --- Configuration for Deployment ---
+# Local imports
+import database
+
+# --- Configuration ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 API_ID = int(os.environ.get("API_ID"))
-API_HASH = os.environ.get("API_HASH")
+API_HASH = os.environ.get("API_HASH"))
 USERBOT_SESSION_STRING = os.environ.get("USERBOT_SESSION_STRING")
-BOT_USERNAME = os.environ.get("BOT_USERNAME")
-USERBOT_USER_ID = int(os.environ.get("USERBOT_USER_ID"))
-
-# --- NEW: Concurrency Limiter ---
-# Sets how many files to download/upload at the same time.
-# 4 is a safe number for Render's free tier.
-CONCURRENCY_LIMIT = 4
+ADMIN_IDS = [int(admin_id) for admin_id in os.environ.get("ADMIN_IDS", "").split()]
 
 # --- Setup Logging ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- UPLOADER FUNCTION (now with Semaphore) ---
-async def process_item_task(semaphore, context, chat_id, media_url, referer_url):
-    """Acquires a semaphore lock, then downloads, uploads, and forwards a single file."""
-    async with semaphore:
-        local_filename = media_url.split('/')[-1].split('?')[0]
-        if len(local_filename) > 60 or not local_filename:
-            file_ext = os.path.splitext(media_url.split('/')[-1].split('?')[0])[1]
-            local_filename = f"temp_media{file_ext}" if file_ext else "temp_media"
-        
-        temp_dir = tempfile.gettempdir()
-        full_path = os.path.join(temp_dir, local_filename)
+last_sent_stats = {}
+admin_filter = filters.User(user_id=ADMIN_IDS)
 
-        app = PyrogramClient("userbot_session", api_id=API_ID, api_hash=API_HASH, session_string=USERBOT_SESSION_STRING)
+# --- Background Worker Logic ---
+async def worker_loop():
+    """Continuously polls the database for new jobs and processes them."""
+    logger.info("Starting background worker loop...")
+    worker_bots_cache = {} # Cache for worker bot instances
+    userbot = PyrogramClient("userbot_session", api_id=API_ID, api_hash=API_HASH, session_string=USERBOT_SESSION_STRING)
+    await userbot.start()
 
-        try:
-            logger.info(f"Downloading {media_url}...")
-            headers = {'Referer': referer_url}
-            with requests.get(media_url, headers=headers, stream=True) as r:
-                r.raise_for_status()
-                with open(full_path, 'wb') as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        f.write(chunk)
+    while True:
+        job = database.get_job()
+        if job:
+            logger.info(f"Worker picked up job: {job['_id']}")
+            user_id = job['user_id']
+            media_url = job['media_url']
+            referer_url = job['referer_url']
 
-            is_video = any(ext in full_path.lower() for ext in ['.mp4', '.mov', '.webm'])
-            caption = f"FORWARD_TO::{chat_id}"
+            local_filename = f"temp_{os.path.basename(requests.utils.urlparse(media_url).path)}"
+            temp_dir = tempfile.gettempdir()
+            full_path = os.path.join(temp_dir, local_filename)
 
-            async with app:
-                while True:
-                    try:
-                        logger.info(f"Uploading {full_path} to the bot {BOT_USERNAME}...")
-                        if is_video:
-                            sent_message = await app.send_video(BOT_USERNAME, full_path, caption=caption)
-                        else:
-                            sent_message = await app.send_photo(BOT_USERNAME, full_path, caption=caption)
-                        logger.info(f"Successfully sent {local_filename} to bot for relay.")
-                        break 
-                    except FloodWait as e:
-                        logger.warning(f"FloodWait received. Sleeping for {e.value + 5} seconds.")
-                        await asyncio.sleep(e.value + 5)
-        except Exception as e:
-            logger.error(f"Failed to process and upload to bot: {e}")
-            await context.bot.send_message(chat_id, f"⚠️ Failed to process file: {local_filename}")
-        finally:
-            if os.path.exists(full_path):
-                os.remove(full_path)
+            try:
+                # 1. Download
+                headers = {'Referer': referer_url}
+                with requests.get(media_url, headers=headers, stream=True) as r:
+                    r.raise_for_status()
+                    with open(full_path, 'wb') as f:
+                        for chunk in r.iter_content(chunk_size=8192): f.write(chunk)
+                
+                is_video = any(ext in full_path.lower() for ext in ['.mp4', '.mov', '.webm'])
+                
+                # 2. Upload and Send
+                user_config = database.get_user_config(user_id)
+                target_chat_id = user_config.get('target_chat_id', user_id)
+                worker_tokens = user_config.get('worker_tokens', [])
+                
+                # Upload to Saved Messages
+                sent_msg = await userbot.send_video("me", full_path) if is_video else await userbot.send_photo("me", full_path)
+                
+                # Forward/Send to Target
+                if target_chat_id != user_id and worker_tokens:
+                    # Use a worker bot
+                    if user_id not in worker_bots_cache:
+                        worker_bots_cache[user_id] = {'bots': [Bot(token) for token in worker_tokens], 'cycle': None}
+                        worker_bots_cache[user_id]['cycle'] = itertools.cycle(worker_bots_cache[user_id]['bots'])
+                    worker_bot = next(worker_bots_cache[user_id]['cycle'])
+                    await worker_bot.forward_message(chat_id=target_chat_id, from_chat_id=sent_msg.chat.id, message_id=sent_msg.id)
+                else:
+                    # Userbot sends directly to the user who requested
+                    await userbot.forward_messages(chat_id=user_id, from_chat_id=sent_msg.chat.id, message_ids=sent_msg.id)
+                
+                await sent_msg.delete()
+                
+                database.update_stats('videos_sent' if is_video else 'images_sent')
+                database.complete_job(job['_id'])
+                logger.info(f"Successfully processed job {job['_id']}")
+            
+            except Exception as e:
+                logger.error(f"Failed to process job {job['_id']}: {e}")
+                database.complete_job(job['_id']) # Remove failed job
+            finally:
+                if os.path.exists(full_path):
+                    os.remove(full_path)
+        else:
+            await asyncio.sleep(5) # Wait if queue is empty
 
-# --- MAIN BOT (PTB) LOGIC ---
+# --- PTB Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Hello! Send me a link.")
+    # ... (code from previous version)
 
-async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    initial_url = update.message.text.strip()
+async def frenzy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ... (code from previous version)
+
+# ... All other handlers from previous version: cf_command, target_command, token_command, tasks_command, clear_queue_command, handle_links, check_and_send_stats ...
+
+async def set_supergroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """(Admin Only) Sets the current supergroup as the logging/ops hub."""
     chat_id = update.message.chat.id
-    await update.message.reply_text("✅ Link received. Scraping...")
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-        response = requests.get(initial_url, headers=headers)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
-        thumbnail_links = soup.select("a.spotlight[data-media]")
-        if not thumbnail_links:
-            await update.message.reply_text("❌ Could not find any media thumbnails.")
-            return
-        media_urls = []
-        for link in thumbnail_links:
-            media_type = link.get('data-media')
-            if media_type == 'video':
-                url = link.get('data-src-mp4')
-                if url: media_urls.append(url)
-            elif media_type == 'image':
-                url = link.get('href')
-                if url: media_urls.append(url)
-        if not media_urls:
-            await update.message.reply_text("Found thumbnails, but no media links.")
-            return
-
-        media_urls = sorted(list(set(media_urls)))
-        await update.message.reply_text(f"👍 Found {len(media_urls)} files. Processing in batches...")
-
-        # --- NEW: Create semaphore and run tasks in a controlled manner ---
-        semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
-        tasks = [process_item_task(semaphore, context, chat_id, media_url, initial_url) for media_url in media_urls]
-        await asyncio.gather(*tasks)
-        
-        await update.message.reply_text("✅ All files processed.")
-    except Exception as e:
-        logger.error(f"Manager error: {e}", exc_info=True)
-        await context.bot.send_message(chat_id, f"An error occurred: {type(e).__name__}")
-
-async def forwarder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """This handler receives files from the userbot and re-sends them cleanly to the user."""
-    if not update.message.caption or not update.message.caption.startswith("FORWARD_TO::"):
+    if update.message.chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("This command can only be used in a supergroup.")
         return
     
+    await update.message.reply_text("Setting up this supergroup... Creating topics...")
     try:
-        destination_chat_id = int(update.message.caption.split("::")[1])
-        logger.info(f"Received file from userbot, re-sending to {destination_chat_id}")
+        topic_names = ["Jobs", "Logs", "User Activity", "Stats"]
+        topic_ids = {}
+        for name in topic_names:
+            topic = await context.bot.create_forum_topic(chat_id=chat_id, name=name)
+            topic_ids[name.lower().replace(" ", "_")] = topic.message_thread_id
         
-        if update.message.video:
-            await context.bot.send_video(chat_id=destination_chat_id, video=update.message.video.file_id)
-        elif update.message.photo:
-            await context.bot.send_photo(chat_id=destination_chat_id, photo=update.message.photo[-1].file_id)
-            
+        database.set_supergroup(chat_id, topic_ids)
+        await update.message.reply_text("✅ Supergroup configured and topics created successfully!")
     except Exception as e:
-        logger.error(f"Failed to re-send message: {e}")
+        await update.message.reply_text(f"Error: {e}. Make sure the bot is an admin with 'Manage Topics' permission.")
 
 # --- Keep-Alive Server and Main Runner ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200); self.send_header('Content-type', 'text/plain'); self.end_headers(); self.wfile.write(b"ok")
+    def do_GET(self): self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers(); self.wfile.write(b"ok")
 
 def run_web_server():
-    port = int(os.environ.get("PORT", 10000)); server_address = ('', port)
-    httpd = HTTPServer(server_address, HealthCheckHandler)
-    logger.info(f"Keep-alive server running on port {port}"); httpd.serve_forever()
+    port = int(os.environ.get("PORT", 10000));
+    httpd = HTTPServer(('', port), HealthCheckHandler)
+    logger.info(f"Keep-alive server on port {port}"); httpd.serve_forever()
 
-def main():
-    if not all([TELEGRAM_BOT_TOKEN, API_ID, API_HASH, USERBOT_SESSION_STRING, BOT_USERNAME, USERBOT_USER_ID]):
-        raise ValueError("One or more required environment variables are missing!")
-
+async def main():
+    # Start web server in a background thread
     web_thread = Thread(target=run_web_server, daemon=True)
     web_thread.start()
 
-    request = HTTPXRequest(connect_timeout=10.0, read_timeout=30.0)
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).request(request).build()
+    # Setup PTB application
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
+    # Add all handlers
     application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_url))
+    application.add_handler(CommandHandler("setsupergroup", set_supergroup_command, filters=admin_filter))
+    # ... add all other command handlers here ...
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_links))
     
-    user_filter = filters.User(user_id=USERBOT_USER_ID)
-    application.add_handler(MessageHandler(filters.PHOTO & user_filter, forwarder_handler))
-    application.add_handler(MessageHandler(filters.VIDEO & user_filter, forwarder_handler))
+    # Setup scheduler
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(check_and_send_stats, 'interval', minutes=15, args=[application])
     
-    print("Stable Batch Bot is running...")
-    application.run_polling()
-
+    # Run PTB, Pyrogram worker, and Scheduler concurrently
+    async with application:
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling()
+        
+        scheduler.start()
+        logger.info("Main bot and stats scheduler are running.")
+        
+        # Start the background worker as a concurrent task
+        await worker_loop()
+        
 if __name__ == '__main__':
-    main()
+    print("Starting Advanced Bot...")
+    asyncio.run(main())
