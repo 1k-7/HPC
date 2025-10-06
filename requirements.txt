@@ -3,3 +3,5 @@ requests
 beautifulsoup4
 pyrogram
 tgcrypto
+pymongo[srv]
+apscheduler
