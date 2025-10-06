@@ -4,8 +4,8 @@ import os
 import requests
 import re
 import tempfile
-import ffmpeg # <-- New import
-import shutil # <-- New import
+import ffmpeg
+import shutil
 from bs4 import BeautifulSoup
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
@@ -42,10 +42,11 @@ logger = logging.getLogger(__name__)
 last_sent_stats = {}
 admin_filter = filters.User(user_id=ADMIN_IDS)
 
-# --- REVISED CORE TASK LOGIC ---
+# --- FINAL REVISED CORE TASK LOGIC ---
 async def process_single_file(semaphore: asyncio.Semaphore, user_id: int, media_url: str, referer_url: str):
     """
-    Acquires a semaphore, then downloads and sends a file with a generated thumbnail to the main bot for relay.
+    Acquires a semaphore, downloads a file, extracts its full metadata, generates a
+    thumbnail, and sends it to the main bot for relay, ensuring it is streamable.
     """
     async with semaphore:
         full_path = ""
@@ -67,34 +68,50 @@ async def process_single_file(semaphore: asyncio.Semaphore, user_id: int, media_
             is_video = any(ext in full_path.lower() for ext in ['.mp4', '.mov', '.webm'])
             caption = f"FORWARD_TO::{target_chat_id}"
 
-            # --- NEW: THUMBNAIL GENERATION LOGIC ---
+            # --- METADATA AND THUMBNAIL EXTRACTION ---
+            duration, width, height = 0, 0, 0
             if is_video:
                 try:
-                    thumb_path = os.path.join(temp_dir, f"{os.path.basename(full_path)}.jpg")
                     probe = ffmpeg.probe(full_path)
-                    video_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
-                    duration = float(video_stream['duration'])
+                    video_stream = next((s for s in probe['streams'] if s['codec_type'] == 'video'), None)
                     
+                    if video_stream:
+                        duration = int(float(video_stream.get('duration', 0)))
+                        width = int(video_stream.get('width', 0))
+                        height = int(video_stream.get('height', 0))
+                        logger.info(f"Metadata for {local_filename}: {duration}s, {width}x{height}")
+
+                    # Generate thumbnail
+                    thumb_path = os.path.join(temp_dir, f"{os.path.basename(full_path)}.jpg")
                     (
-                        ffmpeg
-                        .input(full_path, ss=min(1, duration - 0.1)) # Take thumbnail from 1s mark or earlier
+                        ffmpeg.input(full_path, ss=min(1, duration - 0.1) if duration > 1 else 0)
                         .output(thumb_path, vframes=1)
                         .overwrite_output()
                         .run(capture_stdout=True, capture_stderr=True)
                     )
-                    logger.info(f"Thumbnail generated for {local_filename} at {thumb_path}")
+                    logger.info(f"Thumbnail generated for {local_filename}")
                 except Exception as e:
-                    logger.error(f"Failed to generate thumbnail for {local_filename}: {e}")
-                    thumb_path = None # Proceed without a thumbnail if generation fails
+                    logger.error(f"Failed to extract metadata/thumbnail for {local_filename}: {e}")
+                    thumb_path = None
 
             async with PyrogramClient("userbot_session", api_id=API_ID, api_hash=API_HASH, session_string=USERBOT_SESSION_STRING) as userbot:
                 while True:
                     try:
                         logger.info(f"Uploading {local_filename} to bot {BOT_USERNAME} for relay to {target_chat_id}...")
                         if is_video:
-                            await userbot.send_video(BOT_USERNAME, full_path, caption=caption, thumb=thumb_path)
+                            # --- FIX: EXPLICITLY PASS METADATA ---
+                            await userbot.send_video(
+                                BOT_USERNAME,
+                                full_path,
+                                caption=caption,
+                                thumb=thumb_path,
+                                duration=duration,
+                                width=width,
+                                height=height
+                            )
                         else:
                             await userbot.send_photo(BOT_USERNAME, full_path, caption=caption)
+                        
                         logger.info(f"Successfully sent {local_filename} to bot for relay.")
                         database.update_stats('videos_sent' if is_video else 'images_sent')
                         break
@@ -108,23 +125,21 @@ async def process_single_file(semaphore: asyncio.Semaphore, user_id: int, media_
             if os.path.exists(full_path): os.remove(full_path)
             if thumb_path and os.path.exists(thumb_path): os.remove(thumb_path)
 
+
+# (The rest of your main.py file remains the same as the previous version)
 # --- Background Worker (for Frenzy Mode) ---
 async def frenzy_worker_loop():
     logger.info("Frenzy mode background worker started.")
-    semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT) # Frenzy worker also respects the limit
+    semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
     while True:
         job = database.get_job()
         if job:
-            # Note: We now pass the semaphore to the processing function
             await process_single_file(semaphore, job['user_id'], job['media_url'], job['referer_url'])
             database.complete_job(job['_id'])
         else:
             await asyncio.sleep(5)
 
-# (The rest of your main.py file remains the same... paste this function and the new imports at the top,
-# and ensure the rest of the file (handlers, main function, etc.) is unchanged from the last version I sent)
-
-# --- NEW FORWARDER HANDLER ---
+# --- FORWARDER HANDLER ---
 async def forwarder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.caption or not update.message.caption.startswith("FORWARD_TO::"):
         return
@@ -252,11 +267,8 @@ def run_web_server():
     logger.info(f"Keep-alive server on port {port}"); httpd.serve_forever()
 
 async def main():
-    # --- DIAGNOSTIC CHECK ---
     if not shutil.which("ffmpeg"):
         logger.error("CRITICAL: ffmpeg is not installed or not in the system's PATH. Video processing will fail.")
-        # Depending on the desired behavior, you might want to exit here
-        # return
     else:
         logger.info("ffmpeg installation confirmed.")
 
@@ -267,7 +279,6 @@ async def main():
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start_command))
-    # ... (add all other handlers here as before)
     application.add_handler(CommandHandler("setsupergroup", set_supergroup_command, filters=admin_filter))
     application.add_handler(CommandHandler("frenzy", frenzy_command))
     application.add_handler(CommandHandler("cf", cf_command))
@@ -281,7 +292,6 @@ async def main():
     user_filter = filters.User(user_id=USERBOT_USER_ID)
     application.add_handler(MessageHandler(filters.PHOTO & user_filter, forwarder_handler))
     application.add_handler(MessageHandler(filters.VIDEO & user_filter, forwarder_handler))
-
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     scheduler = AsyncIOScheduler(); scheduler.add_job(check_and_send_stats, 'interval', minutes=15, args=[application.bot]);
@@ -301,5 +311,5 @@ async def main():
             if worker_task: worker_task.cancel(); await asyncio.sleep(1)
 
 if __name__ == '__main__':
-    print("Starting Dual-Mode Bot with Forced Thumbnail Generation...")
+    print("Starting Dual-Mode Bot with Explicit Metadata...")
     asyncio.run(main())
