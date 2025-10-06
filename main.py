@@ -26,9 +26,12 @@ API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 USERBOT_SESSION_STRING = os.environ.get("USERBOT_SESSION_STRING")
 ADMIN_IDS = [int(admin_id) for admin_id in os.environ.get("ADMIN_IDS", "").split()]
-# --- NEW REQUIRED VARS ---
-BOT_USERNAME = os.environ.get("BOT_USERNAME") # e.g. @MyAwesomeBot
-USERBOT_USER_ID = int(os.environ.get("USERBOT_USER_ID")) # The user ID of your userbot
+BOT_USERNAME = os.environ.get("BOT_USERNAME")
+USERBOT_USER_ID = int(os.environ.get("USERBOT_USER_ID"))
+
+# --- NEW: Concurrency Limiter ---
+# Sets how many files can be processed at once to avoid overloading the server.
+CONCURRENCY_LIMIT = 2
 
 # --- Setup Logging ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -38,91 +41,81 @@ logger = logging.getLogger(__name__)
 last_sent_stats = {}
 admin_filter = filters.User(user_id=ADMIN_IDS)
 
-# --- REVISED CORE TASK LOGIC (FROM HPC-SAVE) ---
-async def process_single_file(user_id: int, media_url: str, referer_url: str):
+# --- REVISED CORE TASK LOGIC ---
+async def process_single_file(semaphore: asyncio.Semaphore, user_id: int, media_url: str, referer_url: str):
     """
-    Downloads a file and sends it to the main bot via Pyrogram userbot,
-    with the final destination in the caption for relay.
+    Acquires a semaphore, then downloads and sends a file to the main bot for relay.
     """
-    full_path = ""
-    try:
-        user_config = database.get_user_config(user_id) or {}
-        target_chat_id = user_config.get('target_chat_id', user_id)
+    async with semaphore:
+        full_path = ""
+        try:
+            user_config = database.get_user_config(user_id) or {}
+            target_chat_id = user_config.get('target_chat_id', user_id)
 
-        local_filename = f"temp_{os.path.basename(requests.utils.urlparse(media_url).path)}"
-        temp_dir = tempfile.gettempdir(); full_path = os.path.join(temp_dir, local_filename)
+            local_filename = f"temp_{os.path.basename(requests.utils.urlparse(media_url).path)}"
+            temp_dir = tempfile.gettempdir(); full_path = os.path.join(temp_dir, local_filename)
 
-        logger.info(f"Downloading {media_url} for user {user_id}")
-        headers = {'Referer': referer_url}
-        with requests.get(media_url, headers=headers, stream=True) as r:
-            r.raise_for_status()
-            with open(full_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192): f.write(chunk)
+            logger.info(f"Downloading {media_url} for user {user_id}")
+            headers = {'Referer': referer_url}
+            with requests.get(media_url, headers=headers, stream=True) as r:
+                r.raise_for_status()
+                with open(full_path, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=8192): f.write(chunk)
 
-        is_video = any(ext in full_path.lower() for ext in ['.mp4', '.mov', '.webm'])
-        caption = f"FORWARD_TO::{target_chat_id}"
+            is_video = any(ext in full_path.lower() for ext in ['.mp4', '.mov', '.webm'])
+            caption = f"FORWARD_TO::{target_chat_id}"
 
-        async with PyrogramClient("userbot_session", api_id=API_ID, api_hash=API_HASH, session_string=USERBOT_SESSION_STRING) as userbot:
-            while True:
-                try:
-                    logger.info(f"Uploading {local_filename} to bot {BOT_USERNAME} for relay to {target_chat_id}...")
-                    if is_video:
-                        await userbot.send_video(BOT_USERNAME, full_path, caption=caption)
-                    else:
-                        await userbot.send_photo(BOT_USERNAME, full_path, caption=caption)
-                    logger.info(f"Successfully sent {local_filename} to bot for relay.")
-                    database.update_stats('videos_sent' if is_video else 'images_sent')
-                    break
-                except FloodWait as e:
-                    logger.warning(f"FloodWait received. Sleeping for {e.value + 5} seconds.")
-                    await asyncio.sleep(e.value + 5)
+            async with PyrogramClient("userbot_session", api_id=API_ID, api_hash=API_HASH, session_string=USERBOT_SESSION_STRING) as userbot:
+                while True:
+                    try:
+                        logger.info(f"Uploading {local_filename} to bot {BOT_USERNAME} for relay to {target_chat_id}...")
+                        if is_video:
+                            await userbot.send_video(BOT_USERNAME, full_path, caption=caption)
+                        else:
+                            await userbot.send_photo(BOT_USERNAME, full_path, caption=caption)
+                        logger.info(f"Successfully sent {local_filename} to bot for relay.")
+                        database.update_stats('videos_sent' if is_video else 'images_sent')
+                        break
+                    except FloodWait as e:
+                        logger.warning(f"FloodWait received. Sleeping for {e.value + 5} seconds.")
+                        await asyncio.sleep(e.value + 5)
 
-    except Exception as e:
-        logger.error(f"Failed to process {media_url} for user {user_id}: {e}")
-        # Optionally, send an error message back to the user via the main bot
-        # This part is tricky as we don't have the 'context' object here.
-        # A more advanced implementation might pass the bot instance around.
-    finally:
-        if os.path.exists(full_path):
-            os.remove(full_path)
+        except Exception as e:
+            logger.error(f"Failed to process {media_url} for user {user_id}: {e}")
+        finally:
+            if os.path.exists(full_path):
+                os.remove(full_path)
 
 # --- Background Worker (for Frenzy Mode) ---
 async def frenzy_worker_loop():
     logger.info("Frenzy mode background worker started.")
+    semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT) # Frenzy worker also respects the limit
     while True:
         job = database.get_job()
         if job:
-            await process_single_file(job['user_id'], job['media_url'], job['referer_url'])
+            await process_single_file(semaphore, job['user_id'], job['media_url'], job['referer_url'])
             database.complete_job(job['_id'])
         else:
             await asyncio.sleep(5)
 
-# --- NEW FORWARDER HANDLER (FROM HPC-SAVE) ---
+# --- NEW FORWARDER HANDLER ---
 async def forwarder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    This handler receives files from the userbot and re-sends them cleanly to the user.
-    It only activates for messages sent by the userbot.
-    """
     if not update.message.caption or not update.message.caption.startswith("FORWARD_TO::"):
         return
-
     try:
         destination_chat_id = int(update.message.caption.split("::")[1])
         logger.info(f"Received file from userbot, re-sending to {destination_chat_id}")
-
         if update.message.video:
             await context.bot.send_video(chat_id=destination_chat_id, video=update.message.video.file_id)
         elif update.message.photo:
-            # Send the highest quality photo
             await context.bot.send_photo(chat_id=destination_chat_id, photo=update.message.photo[-1].file_id)
-
     except Exception as e:
         logger.error(f"Failed to re-send message from userbot: {e}")
 
-# --- PTB Handlers (largely unchanged) ---
+# --- PTB Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    database.set_frenzy_mode(user.id, False) # Default to Normal Mode
+    database.set_frenzy_mode(user.id, False)
     await update.message.reply_text("Bot ready. Send a link to process it. Use `/frenzy` to queue multiple links.")
 
 async def frenzy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -131,18 +124,15 @@ async def frenzy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     database.set_frenzy_mode(update.effective_user.id, False)
-    await update.message.reply_text("⛔ **Normal Mode Activated**. I will process one link at a time, and wait until it's finished.")
+    await update.message.reply_text("⛔ **Normal Mode Activated**. I will process links in small batches.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    user_config = database.get_user_config(user_id)
-    is_in_frenzy = user_config.get("frenzy_mode_active", False)
-
+    is_in_frenzy = database.get_user_config(user_id).get("frenzy_mode_active", False)
     text = update.message.text
     urls = re.findall(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', text)
     if not urls: return
 
-    # --- Scrape logic is now shared ---
     scraped_media = []
     await update.message.reply_text(f"Found {len(urls)} link(s). Scraping for media...")
     for url in urls:
@@ -154,7 +144,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for link in thumbnail_links:
                 media_url = link.get('data-src-mp4') if link.get('data-media') == 'video' else link.get('href')
                 if media_url:
-                    scraped_media.append((media_url, url)) # Store with its referer
+                    scraped_media.append((media_url, url))
         except Exception as e:
             logger.error(f"Failed to scrape {url}: {e}")
 
@@ -165,15 +155,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_in_frenzy:
         for media_url, referer_url in scraped_media:
             database.add_job(user_id, media_url, referer_url)
-        await update.message.reply_text(f"✅ Queued {len(scraped_media)} media files. The worker will process them in the background.")
+        await update.message.reply_text(f"✅ Queued {len(scraped_media)} media files. The background worker will process them.")
     else:
-        # NORMAL MODE: Block and process now
-        await update.message.reply_text(f"Found {len(scraped_media)} files. Processing now, please wait...")
-        tasks = [process_single_file(user_id, media_url, referer_url) for media_url, referer_url in scraped_media]
+        # --- FIX: NORMAL MODE NOW USES A SEMAPHORE TO PREVENT OVERLOAD ---
+        await update.message.reply_text(f"Found {len(scraped_media)} files. Processing in small batches to ensure stability...")
+        semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
+        tasks = [process_single_file(semaphore, user_id, media_url, referer_url) for media_url, referer_url in scraped_media]
         await asyncio.gather(*tasks)
         await update.message.reply_text("✅ Task complete.")
 
-# --- Admin, Stats, and Other Handlers (Unchanged) ---
+# --- Admin, Stats, and Other Handlers ---
 async def target_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         target_id = int(context.args[0]); database.set_user_target(update.effective_user.id, target_id)
@@ -242,7 +233,6 @@ async def main():
     web_thread = Thread(target=run_web_server, daemon=True); web_thread.start()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # --- Add all command handlers ---
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("setsupergroup", set_supergroup_command, filters=admin_filter))
     application.add_handler(CommandHandler("frenzy", frenzy_command))
@@ -254,12 +244,10 @@ async def main():
     application.add_handler(CommandHandler("cc", clear_queue_command))
     application.add_handler(CommandHandler("ce", clear_queue_command))
 
-    # --- ADD NEW FORWARDER HANDLER ---
     user_filter = filters.User(user_id=USERBOT_USER_ID)
     application.add_handler(MessageHandler(filters.PHOTO & user_filter, forwarder_handler))
     application.add_handler(MessageHandler(filters.VIDEO & user_filter, forwarder_handler))
 
-    # --- Add general message handler (must be last) ---
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     scheduler = AsyncIOScheduler(); scheduler.add_job(check_and_send_stats, 'interval', minutes=15, args=[application.bot]);
@@ -281,4 +269,3 @@ async def main():
 if __name__ == '__main__':
     print("Starting Dual-Mode Bot with Stable Forwarding Logic...")
     asyncio.run(main())
-
