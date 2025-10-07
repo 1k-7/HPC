@@ -106,12 +106,24 @@ async def process_single_file(semaphore: asyncio.Semaphore, user_id: int, media_
             if thumb_path and os.path.exists(thumb_path): os.remove(thumb_path)
 
 # --- Background Worker ---
-async def frenzy_worker_loop():
+async def frenzy_worker_loop(bot: Bot):
     semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
     while True:
         job = database.get_job()
         if job:
             await process_single_file(semaphore, job['user_id'], job['media_url'], job['referer_url'], job['task_id'])
+            database.complete_job(job['_id'])
+            
+            # Check if this was the last job for the task
+            if database.count_pending_jobs_for_task(job['task_id']) == 0:
+                is_authorized = database.is_user_authorized(job['user_id'])
+                completion_message = "✨ <b>Task Complete.</b>"
+                if is_authorized:
+                    completion_message += f"\nFetch ID: <code>/fetch_{job['task_id']}</code>"
+                try:
+                    await bot.send_message(chat_id=job['chat_id'], text=completion_message, parse_mode=ParseMode.HTML)
+                except Exception as e:
+                    logger.error(f"Failed to send completion message for task {job['task_id']}: {e}")
         else:
             await asyncio.sleep(5)
 
@@ -151,14 +163,14 @@ async def cf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⚙️ <b>Normal Mode Engaged.</b>", parse_mode=ParseMode.HTML)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user, user_id = update.effective_user, update.effective_user.id
+    user, user_id, chat_id = update.effective_user, update.effective_user.id, update.effective_chat.id
     is_in_frenzy = database.get_user_config(user_id).get("frenzy_mode_active", False)
     urls = re.findall(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', update.message.text)
     if not urls: return
     
     task_id = generate_task_id()
     is_authorized = database.is_user_authorized(user_id)
-    status_message = await update.message.reply_text(f"Processing {len(urls)} link(s)...", parse_mode=ParseMode.HTML)
+    status_message = await update.message.reply_text(f"Processing...", parse_mode=ParseMode.HTML)
     
     scraped_media = []
     for url in urls:
@@ -170,7 +182,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e: logger.error(f"Failed to scrape {url}: {e}")
     
     if not scraped_media:
-        await status_message.edit_text("👻 <b>Scan Complete.</b> No media found.", parse_mode=ParseMode.HTML); return
+        await status_message.edit_text("👻 <b>No media found.</b>", parse_mode=ParseMode.HTML); return
     
     videos_count = sum(1 for media_url, _ in scraped_media if any(ext in media_url.lower() for ext in ['.mp4', '.mov', '.webm']))
     images_count = len(scraped_media) - videos_count
@@ -180,19 +192,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await log_to_topic(context.bot, 'user_activity', log_message)
 
     if is_in_frenzy:
-        for media_url, referer_url in scraped_media: database.add_job(user_id, media_url, referer_url, task_id)
+        for media_url, referer_url in scraped_media: database.add_job(user_id, chat_id, media_url, referer_url, task_id)
         await log_to_topic(context.bot, 'jobs', f"💼 Queued {len(scraped_media)} jobs from task <code>{task_id}</code> for user <code>{user_id}</code>.")
-        await status_message.edit_text(f"⛩️ <b>Queue Updated.</b> {len(scraped_media)} files added.", parse_mode=ParseMode.HTML)
+        await status_message.edit_text(f"⛩️ <b>{len(scraped_media)} files queued.</b>", parse_mode=ParseMode.HTML)
     else:
         await status_message.edit_text(f"📥 <b>{len(scraped_media)} files found.</b> Transferring...", parse_mode=ParseMode.HTML)
         semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
         tasks = [process_single_file(semaphore, user_id, media_url, referer_url, task_id) for media_url, referer_url in scraped_media]
         await asyncio.gather(*tasks)
         
-        completion_message = "✨ <b>Task Complete.</b>"
+        await status_message.edit_text("<i>🖇️ Completed</i>", parse_mode=ParseMode.HTML)
+        
+        completion_message = "✨ <b>Task finished.</b>"
         if is_authorized:
             completion_message += f"\nFetch ID: <code>/fetch_{task_id}</code>"
-        await status_message.edit_text(completion_message, parse_mode=ParseMode.HTML)
+        await update.message.reply_text(completion_message, parse_mode=ParseMode.HTML)
 
 @log_user_activity
 async def authfe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -232,7 +246,6 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"🏮 <b>Delivery Error.</b>\nFailed to send one of the files from task <code>{task_id}</code>.", parse_mode=ParseMode.HTML)
         await asyncio.sleep(1)
 
-# (All other command handlers like target, status, etc., are unchanged)
 @log_user_activity
 async def target_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -309,7 +322,6 @@ async def main():
     web_thread = Thread(target=run_web_server, daemon=True); web_thread.start()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # --- Simple, linear handler registration ---
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("setsupergroup", set_supergroup_command, filters=admin_filter))
     application.add_handler(CommandHandler("frenzy", frenzy_command))
@@ -320,8 +332,6 @@ async def main():
     application.add_handler(CommandHandler("tasks", tasks_command))
     application.add_handler(CommandHandler("cc", clear_queue_command))
     application.add_handler(CommandHandler("ce", clear_queue_command))
-    
-    # New Auth Commands (Admin Only)
     application.add_handler(CommandHandler("authfe", authfe_command, filters=admin_filter))
     application.add_handler(CommandHandler("unauthfe", unauthfe_command, filters=admin_filter))
 
@@ -335,7 +345,8 @@ async def main():
     scheduler = AsyncIOScheduler(); scheduler.add_job(check_and_send_stats, 'interval', minutes=15, args=[application.bot])
     async with application:
         scheduler.start()
-        worker_task = asyncio.create_task(frenzy_worker_loop())
+        # Pass the bot instance to the worker loop
+        worker_task = asyncio.create_task(frenzy_worker_loop(application.bot))
         await application.start()
         await application.updater.start_polling(drop_pending_updates=True)
         try: await asyncio.Future()
