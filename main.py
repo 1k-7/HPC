@@ -47,13 +47,7 @@ def log_user_activity(func):
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         user = update.effective_user
         if user and update.message.text.startswith('/'):
-            log_message = (
-                f"👤 *User Activity*\n\n"
-                f"*Name:* {user.full_name}\n"
-                f"*Username:* @{user.username}\n"
-                f"*ID:* `{user.id}`\n"
-                f"*Command:* `{update.message.text}`"
-            )
+            log_message = (f"👤 *User Activity*\n\n*Name:* {user.full_name}\n*Username:* @{user.username}\n*ID:* `{user.id}`\n*Command:* `{update.message.text}`")
             await log_to_topic(context.bot, 'user_activity', log_message)
         return await func(update, context, *args, **kwargs)
     return wrapped
@@ -65,25 +59,23 @@ async def process_single_file(semaphore: asyncio.Semaphore, user_id: int, media_
         try:
             target_chat_id = database.get_user_config(user_id).get('target_chat_id', user_id)
             caption = f"FORWARD_TO::{target_chat_id}::{task_id}"
-            
-            # (Rest of the function is the same robust media processing)
             local_filename = f"temp_{os.path.basename(requests.utils.urlparse(media_url).path)}"
             temp_dir = tempfile.gettempdir(); full_path = os.path.join(temp_dir, local_filename)
             with requests.get(media_url, headers={'Referer': referer_url}, stream=True) as r:
-                r.raise_for_status()
+                r.raise_for_status();
                 with open(full_path, 'wb') as f: shutil.copyfileobj(r.raw, f)
             is_video = any(ext in full_path.lower() for ext in ['.mp4', '.mov', '.webm'])
-            duration, width, height = 0, 0, 0
             if is_video:
+                duration, width, height = 0,0,0
                 try:
                     probe = ffmpeg.probe(full_path)
                     video_stream = next((s for s in probe['streams'] if s['codec_type'] == 'video'), None)
                     if video_stream:
-                        duration, width, height = int(float(video_stream.get('duration', 0))), int(video_stream.get('width', 0)), int(video_stream.get('height', 0))
+                        duration, width, height = int(float(video_stream.get('duration',0))), int(video_stream.get('width',0)), int(video_stream.get('height',0))
                     thumb_path = os.path.join(temp_dir, f"{os.path.basename(full_path)}.jpg")
                     (ffmpeg.input(full_path, ss=min(1, duration - 0.1) if duration > 1 else 0).output(thumb_path, vframes=1).overwrite_output().run(capture_stdout=True, capture_stderr=True))
                 except Exception as e:
-                    logger.error(f"Metadata/thumbnail failed: {e}"); thumb_path = None
+                    logger.error(f"Metadata failed: {e}"); thumb_path = None
             async with PyrogramClient("userbot_session", api_id=API_ID, api_hash=API_HASH, session_string=USERBOT_SESSION_STRING) as userbot:
                 while True:
                     try:
@@ -151,7 +143,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_in_frenzy = database.get_user_config(user_id).get("frenzy_mode_active", False)
     urls = re.findall(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', update.message.text)
     if not urls: return
-
     task_id = f"{user_id}_{int(time.time())}"
     await update.message.reply_text(f"📡 *Scanning {len(urls)} link(s)\.\.\.*", parse_mode=ParseMode.MARKDOWN_V2)
     scraped_media = []
@@ -162,15 +153,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 media_url = link.get('data-src-mp4') if link.get('data-media') == 'video' else link.get('href')
                 if media_url: scraped_media.append((media_url, url))
         except Exception as e: logger.error(f"Failed to scrape {url}: {e}")
-
     if not scraped_media:
         await update.message.reply_text("👻 *Scan Complete\.*\nNo valid media found on the page\(s\)\.", parse_mode=ParseMode.MARKDOWN_V2); return
-    
     videos_count = sum(1 for media_url, _ in scraped_media if any(ext in media_url.lower() for ext in ['.mp4', '.mov', '.webm']))
     images_count = len(scraped_media) - videos_count
     log_message = (f"🔗 *Link Submission*\n\n*User:* {user.full_name} (`{user.id}`)\n*Link(s):*\n" + "\n".join(f"`{u}`" for u in urls) + f"\n\n*Media Found:* {len(scraped_media)}\n" + (f"*Videos:* {videos_count}\n" if videos_count > 0 else "") + (f"*Images:* {images_count}\n" if images_count > 0 else "") + f"\n*Fetch Command:* `/fetch_{task_id}`")
     await log_to_topic(context.bot, 'user_activity', log_message)
-
     if is_in_frenzy:
         for media_url, referer_url in scraped_media: database.add_job(user_id, media_url, referer_url, task_id)
         await log_to_topic(context.bot, 'jobs', f"💼 Queued {len(scraped_media)} jobs from task `{task_id}` for user `{user_id}`\.")
@@ -184,7 +172,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @log_user_activity
 async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # (This function and all other command handlers remain the same as the previous correct version)
     if not update.message.text.startswith('/fetch_'):
         await update.message.reply_text("🏮 *Invalid Command\.*\nUse the format `/fetch_taskID`\.", parse_mode=ParseMode.MARKDOWN_V2); return
     task_id = update.message.text[len('/fetch_'):]
@@ -201,15 +188,13 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"🏮 *Delivery Error\.*\nFailed to send one of the files from task `{task_id}`\.", parse_mode=ParseMode.MARKDOWN_V2)
         await asyncio.sleep(1)
 
-# (All other command handlers like target, status, etc., are unchanged)
 @log_user_activity
 async def target_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         target_id = int(context.args[0])
         database.set_user_target(update.effective_user.id, target_id)
         await update.message.reply_text(f"🎯 *Target Acquired\.*\nAll future media will be sent to `{target_id}`\.", parse_mode=ParseMode.MARKDOWN_V2)
-    except (IndexError, ValueError):
-        await update.message.reply_text("🏮 *Syntax Error\.*\nPlease use `/target <chat_id>`\.", parse_mode=ParseMode.MARKDOWN_V2)
+    except (IndexError, ValueError): await update.message.reply_text("🏮 *Syntax Error\.*\nPlease use `/target <chat_id>`\.", parse_mode=ParseMode.MARKDOWN_V2)
 
 @log_user_activity
 async def cleartarget_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -222,12 +207,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     frenzy_mode_active = user_config.get("frenzy_mode_active", False)
     frenzy_status = "⛩️ Frenzy (Queued)" if frenzy_mode_active else "⚙️ Normal (Real-time)"
     target_status = user_config.get("target_chat_id", "This Chat")
-    await update.message.reply_text(
-        f"📜 *Current Status*\n\n"
-        f"∙ *Mode:* `{frenzy_status}`\n"
-        f"∙ *Destination:* `{target_status}`",
-        parse_mode=ParseMode.MARKDOWN_V2
-    )
+    await update.message.reply_text(f"📜 *Current Status*\n\n∙ *Mode:* `{frenzy_status}`\n∙ *Destination:* `{target_status}`", parse_mode=ParseMode.MARKDOWN_V2)
 
 @log_user_activity
 async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -243,8 +223,7 @@ async def clear_queue_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def set_supergroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.message.chat
     if not chat.is_forum:
-        await update.message.reply_text("🏮 *Configuration Error\.*\nThis command must be used in a supergroup with Topics enabled\.", parse_mode=ParseMode.MARKDOWN_V2)
-        return
+        await update.message.reply_text("🏮 *Configuration Error\.*\nThis command must be used in a supergroup with Topics enabled\.", parse_mode=ParseMode.MARKDOWN_V2); return
     await update.message.reply_text("Initializing supergroup integration\.\.\.", parse_mode=ParseMode.MARKDOWN_V2)
     try:
         topic_names = ["Jobs", "Logs", "User Activity", "Stats"]; topic_ids = {}
@@ -253,19 +232,19 @@ async def set_supergroup_command(update: Update, context: ContextTypes.DEFAULT_T
             topic_ids[name.lower().replace(" ", "_")] = topic.message_thread_id
         database.set_supergroup(chat.id, topic_ids)
         await update.message.reply_text("💠 *Supergroup Linked\.*\nLogging channels are now active\.", parse_mode=ParseMode.MARKDOWN_V2)
-    except Exception as e:
-        await update.message.reply_text(f"🏮 *Setup Failed:* `{e}`", parse_mode=ParseMode.MARKDOWN_V2)
+    except Exception as e: await update.message.reply_text(f"🏮 *Setup Failed:* `{e}`", parse_mode=ParseMode.MARKDOWN_V2)
 
 async def check_and_send_stats(bot: Bot):
     global last_sent_stats; current_stats = database.get_stats()
     if current_stats and current_stats != last_sent_stats:
-        settings = database.get_settings()
+        settings = database.get_settings();
         if not settings: return
         stats_message = "📊 *Bot Stats*\n\n"
         for key, value in current_stats.items():
             if key != '_id': stats_message += f"*{key.replace('_', ' ').title()}*: `{value}`\n"
         await log_to_topic(bot, 'stats', stats_message)
         last_sent_stats = current_stats; logger.info("Sent stats update.")
+
 async def log_to_topic(bot: Bot, topic_key: str, text: str):
     settings = database.get_settings()
     if settings and 'supergroup_id' in settings:
@@ -273,8 +252,10 @@ async def log_to_topic(bot: Bot, topic_key: str, text: str):
         if topic_key in topic_ids:
             try: await bot.send_message(chat_id=settings['supergroup_id'], message_thread_id=topic_ids[topic_key], text=text, parse_mode=ParseMode.MARKDOWN_V2)
             except Exception as e: logger.error(f"Failed to log to topic '{topic_key}': {e}")
+
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self): self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers(); self.wfile.write(b"ok")
+
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     httpd = HTTPServer(('', port), HealthCheckHandler)
@@ -286,7 +267,7 @@ async def main():
     web_thread = Thread(target=run_web_server, daemon=True); web_thread.start()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # --- Use the Simple, Proven Handler Registration Logic ---
+    # --- Use the Simple, Proven Handler Registration from your working file ---
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("setsupergroup", set_supergroup_command, filters=admin_filter))
     application.add_handler(CommandHandler("frenzy", frenzy_command))
@@ -303,7 +284,7 @@ async def main():
     application.add_handler(MessageHandler(filters.PHOTO & user_filter, forwarder_handler))
     application.add_handler(MessageHandler(filters.VIDEO & user_filter, forwarder_handler))
     
-    # This is the general-purpose handler for links. It comes after the more specific handlers.
+    # This general-purpose handler for links comes after the more specific handlers.
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     scheduler = AsyncIOScheduler(); scheduler.add_job(check_and_send_stats, 'interval', minutes=15, args=[application.bot])
