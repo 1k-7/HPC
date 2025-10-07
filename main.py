@@ -19,6 +19,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 # Telegram (PTB) imports
 from telegram import Update, Bot
 from telegram.constants import ParseMode
+from telegram.error import Conflict
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # Pyrogram imports
@@ -28,7 +29,7 @@ from pyrogram.errors import FloodWait
 # Local imports
 import database
 
-# --- Configuration ---
+# --- Configuration & Globals ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
@@ -38,15 +39,39 @@ BOT_USERNAME = os.environ.get("BOT_USERNAME")
 USERBOT_USER_ID = int(os.environ.get("USERBOT_USER_ID"))
 CONCURRENCY_LIMIT = 2
 
+START_TIME = time.time()
+httpd = None # Global webserver instance
+
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 last_sent_stats = {}
 admin_filter = filters.User(user_id=ADMIN_IDS)
 
+# --- NEW: Conflict Error Handler ---
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles errors from the bot, specifically for GetUpdates conflicts."""
+    global httpd
+    if isinstance(context.error, Conflict):
+        uptime = time.time() - START_TIME
+        logger.warning(f"GetUpdates conflict detected. Uptime: {uptime:.2f} seconds.")
+        if uptime > 15:
+            logger.error("This is an old instance. Shutting down to prevent conflicts.")
+            
+            # 1. Stop the bot gracefully
+            await context.application.shutdown()
+            
+            # 2. Stop the webserver
+            if httpd:
+                shutdown_thread = Thread(target=httpd.shutdown)
+                shutdown_thread.start()
+                logger.info("Web server shutdown initiated.")
+
+            # 3. Forcefully exit the entire process
+            os._exit(1)
+
 # --- Helper for Alphanumeric IDs ---
 def generate_task_id(length=12):
-    """Generates a random alphanumeric string."""
     alphabet = string.ascii_lowercase + string.digits
     return ''.join(secrets.choice(alphabet) for i in range(length))
 
@@ -114,7 +139,6 @@ async def frenzy_worker_loop(bot: Bot):
             await process_single_file(semaphore, job['user_id'], job['media_url'], job['referer_url'], job['task_id'])
             database.complete_job(job['_id'])
             
-            # Check if this was the last job for the task
             if database.count_pending_jobs_for_task(job['task_id']) == 0:
                 is_authorized = database.is_user_authorized(job['user_id'])
                 completion_message = "✨ <b>Task Complete.</b>"
@@ -208,6 +232,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             completion_message += f"\nFetch ID: <code>/fetch_{task_id}</code>"
         await update.message.reply_text(completion_message, parse_mode=ParseMode.HTML)
 
+# (All other command handlers remain the same)
 @log_user_activity
 async def authfe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -311,7 +336,9 @@ async def log_to_topic(bot: Bot, topic_key: str, text: str):
             except Exception as e: logger.error(f"Failed to log to topic '{topic_key}': {e}")
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self): self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers(); self.wfile.write(b"ok")
+
 def run_web_server():
+    global httpd
     port = int(os.environ.get("PORT", 10000))
     httpd = HTTPServer(('', port), HealthCheckHandler)
     logger.info(f"Keep-alive server on port {port}"); httpd.serve_forever()
@@ -320,7 +347,11 @@ async def main():
     if not all([TELEGRAM_BOT_TOKEN, API_ID, API_HASH, USERBOT_SESSION_STRING, ADMIN_IDS, BOT_USERNAME, USERBOT_USER_ID]):
         raise ValueError("One or more required environment variables are missing!")
     web_thread = Thread(target=run_web_server, daemon=True); web_thread.start()
+    
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    # Add the error handler
+    application.add_error_handler(error_handler)
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("setsupergroup", set_supergroup_command, filters=admin_filter))
@@ -345,7 +376,6 @@ async def main():
     scheduler = AsyncIOScheduler(); scheduler.add_job(check_and_send_stats, 'interval', minutes=15, args=[application.bot])
     async with application:
         scheduler.start()
-        # Pass the bot instance to the worker loop
         worker_task = asyncio.create_task(frenzy_worker_loop(application.bot))
         await application.start()
         await application.updater.start_polling(drop_pending_updates=True)
