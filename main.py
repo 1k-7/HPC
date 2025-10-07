@@ -102,7 +102,7 @@ async def forwarder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Failed to re-send message: {e}")
 
-# --- PTB Handlers with New Prompts ---
+# --- PTB Handlers with Corrected Prompts ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     database.set_frenzy_mode(update.effective_user.id, False)
     await update.message.reply_text("✨ *System Online\.*\nReady for links\. Use `/frenzy` for bulk processing\.", parse_mode=ParseMode.MARKDOWN_V2)
@@ -113,7 +113,7 @@ async def frenzy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     database.set_frenzy_mode(update.effective_user.id, False)
-    await update.message.reply_text("⚙️ *Normal Mode Engaged\.*\nProcessing links one by one, in real-time\.", parse_mode=ParseMode.MARKDOWN_V2)
+    await update.message.reply_text("⚙️ *Normal Mode Engaged\.*\nProcessing links one by one, in real\-time\.", parse_mode=ParseMode.MARKDOWN_V2)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -132,7 +132,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e: logger.error(f"Failed to scrape {url}: {e}")
 
     if not scraped_media:
-        await update.message.reply_text("👻 *Scan Complete\.*\nNo valid media found on the page\(s\)\.", parse_mode=ParseMode.MARKDOWN_V2); return
+        await update.message.reply_text("👻 *Scan Complete\.*\nNo valid media found on the page\\(s\\)\\.", parse_mode=ParseMode.MARKDOWN_V2); return
     
     if is_in_frenzy:
         for media_url, referer_url in scraped_media:
@@ -185,4 +185,3 @@ async def main():
 if __name__ == '__main__':
     print("Starting Bot in Step 1 Mode (New Prompts)...")
     asyncio.run(main())
-
