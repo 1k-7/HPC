@@ -1,4 +1,3 @@
-#main.py
 import logging
 import asyncio
 import os
@@ -212,8 +211,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     videos_count = sum(1 for media_url, _ in scraped_media if any(ext in media_url.lower() for ext in ['.mp4', '.mov', '.webm']))
     images_count = len(scraped_media) - videos_count
     
-    fetch_command_log = f"\n<b>Fetch Command:</b> <code>/fetch_{task_id}</code>" if is_authorized else ""
-    log_message = (f"🔗 <b>Link Submission</b>\n\n<b>User:</b> {html.escape(user.full_name)} (<code>{user.id}</code>)\n" + f"<b>Media Found:</b> {len(scraped_media)}\n" + (f"<b>Videos:</b> {videos_count}\n" if videos_count > 0 else "") + (f"<b>Images:</b> {images_count}\n" if images_count > 0 else "") + fetch_command_log)
+    # --- CORRECTED LOGIC: Fetch ID is ALWAYS included in the log ---
+    log_message = (f"🔗 <b>Link Submission</b>\n\n<b>User:</b> {html.escape(user.full_name)} (<code>{user.id}</code>)\n" + f"<b>Media Found:</b> {len(scraped_media)}\n" + (f"<b>Videos:</b> {videos_count}\n" if videos_count > 0 else "") + (f"<b>Images:</b> {images_count}\n" if images_count > 0 else "") + f"\n<b>Fetch Command:</b> <code>/fetch_{task_id}</code>")
     await log_to_topic(context.bot, 'user_activity', log_message)
 
     if is_in_frenzy:
@@ -351,7 +350,6 @@ async def main():
     
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    # Add the error handler
     application.add_error_handler(error_handler)
 
     application.add_handler(CommandHandler("start", start_command))
