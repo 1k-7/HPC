@@ -7,6 +7,7 @@ import tempfile
 import ffmpeg
 import shutil
 import time
+import html  # <-- THE CRITICAL FIX
 from functools import wraps
 from bs4 import BeautifulSoup
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -16,7 +17,6 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 # Telegram (PTB) imports
 from telegram import Update, Bot
 from telegram.constants import ParseMode
-from telegram.helpers import escape_html
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # Pyrogram imports
@@ -48,11 +48,11 @@ def log_user_activity(func):
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         user = update.effective_user
         if user and update.message.text and update.message.text.startswith('/'):
-            user_info = f"<b>Name:</b> {escape_html(user.full_name)}\n"
+            user_info = f"<b>Name:</b> {html.escape(user.full_name)}\n"
             if user.username:
                 user_info += f"<b>Username:</b> @{user.username}\n"
             user_info += f"<b>ID:</b> <code>{user.id}</code>\n"
-            log_message = (f"👤 <b>User Activity</b>\n\n{user_info}<b>Command:</b> <code>{escape_html(update.message.text)}</code>")
+            log_message = (f"👤 <b>User Activity</b>\n\n{user_info}<b>Command:</b> <code>{html.escape(update.message.text)}</code>")
             await log_to_topic(context.bot, 'user_activity', log_message)
         return await func(update, context, *args, **kwargs)
     return wrapped
@@ -162,7 +162,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("👻 <b>Scan Complete.</b>\nNo valid media found on the page(s).", parse_mode=ParseMode.HTML); return
     videos_count = sum(1 for media_url, _ in scraped_media if any(ext in media_url.lower() for ext in ['.mp4', '.mov', '.webm']))
     images_count = len(scraped_media) - videos_count
-    log_message = (f"🔗 <b>Link Submission</b>\n\n<b>User:</b> {escape_html(user.full_name)} (<code>{user.id}</code>)\n<b>Link(s):</b>\n" + "\n".join(f"<code>{escape_html(u)}</code>" for u in urls) + f"\n\n<b>Media Found:</b> {len(scraped_media)}\n" + (f"<b>Videos:</b> {videos_count}\n" if videos_count > 0 else "") + (f"<b>Images:</b> {images_count}\n" if images_count > 0 else "") + f"\n<b>Fetch Command:</b> <code>/fetch_{task_id}</code>")
+    log_message = (f"🔗 <b>Link Submission</b>\n\n<b>User:</b> {html.escape(user.full_name)} (<code>{user.id}</code>)\n<b>Link(s):</b>\n" + "\n".join(f"<code>{html.escape(u)}</code>" for u in urls) + f"\n\n<b>Media Found:</b> {len(scraped_media)}\n" + (f"<b>Videos:</b> {videos_count}\n" if videos_count > 0 else "") + (f"<b>Images:</b> {images_count}\n" if images_count > 0 else "") + f"\n<b>Fetch Command:</b> <code>/fetch_{task_id}</code>")
     await log_to_topic(context.bot, 'user_activity', log_message)
     if is_in_frenzy:
         for media_url, referer_url in scraped_media: database.add_job(user_id, media_url, referer_url, task_id)
@@ -237,7 +237,7 @@ async def set_supergroup_command(update: Update, context: ContextTypes.DEFAULT_T
             topic_ids[name.lower().replace(" ", "_")] = topic.message_thread_id
         database.set_supergroup(chat.id, topic_ids)
         await update.message.reply_text("💠 <b>Supergroup Linked.</b>\nLogging channels are now active.", parse_mode=ParseMode.HTML)
-    except Exception as e: await update.message.reply_text(f"🏮 <b>Setup Failed:</b> <code>{escape_html(str(e))}</code>", parse_mode=ParseMode.HTML)
+    except Exception as e: await update.message.reply_text(f"🏮 <b>Setup Failed:</b> <code>{html.escape(str(e))}</code>", parse_mode=ParseMode.HTML)
 
 async def check_and_send_stats(bot: Bot):
     global last_sent_stats; current_stats = database.get_stats()
@@ -246,7 +246,7 @@ async def check_and_send_stats(bot: Bot):
         if not settings: return
         stats_message = "📊 <b>Bot Stats</b>\n\n"
         for key, value in current_stats.items():
-            if key != '_id': stats_message += f"<b>{escape_html(key.replace('_', ' ').title())}:</b> <code>{value}</code>\n"
+            if key != '_id': stats_message += f"<b>{html.escape(key.replace('_', ' ').title())}:</b> <code>{value}</code>\n"
         await log_to_topic(bot, 'stats', stats_message)
         last_sent_stats = current_stats; logger.info("Sent stats update.")
 
