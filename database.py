@@ -10,7 +10,7 @@ jobs_collection = db['jobs']
 users_collection = db['users']
 stats_collection = db['stats']
 settings_collection = db['settings']
-file_details_collection = db['file_details'] # New collection for fetched files
+file_details_collection = db['file_details'] # For fetched files
 
 # --- Settings ---
 def get_settings():
