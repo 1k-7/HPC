@@ -401,7 +401,7 @@ async def main():
     # --- Add all handlers with aliases ---
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler(["setsupergroup", "ssg"], set_supergroup_command, filters=admin_filter))
-    application.add_handler(CommandHandler(["frenzy", "f"] frenzy_command))
+    application.add_handler(CommandHandler(["frenzy", "f"], frenzy_command))
     application.add_handler(CommandHandler(["cf", "calm"], cf_command))
     application.add_handler(CommandHandler("target", target_command))
     application.add_handler(CommandHandler("cleartarget", cleartarget_command))
