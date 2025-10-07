@@ -36,20 +36,29 @@ def is_user_authorized(user_id):
     return authorized_users_collection.find_one({"_id": user_id}) is not None
 
 # --- Job Management ---
-def add_job(user_id, media_url, referer_url, task_id):
-    jobs_collection.insert_one({"user_id": user_id, "media_url": media_url, "referer_url": referer_url, "task_id": task_id, "status": "pending", "created_at": datetime.utcnow()})
+def add_job(user_id, chat_id, media_url, referer_url, task_id):
+    jobs_collection.insert_one({"user_id": user_id, "chat_id": chat_id, "media_url": media_url, "referer_url": referer_url, "task_id": task_id, "status": "pending", "created_at": datetime.utcnow()})
 
 def get_job():
-    return jobs_collection.find_one_and_update({"status": "pending"}, {"$set": {"status": "processing"}}, sort=[("created_at", 1)], return_document=ReturnDocument.AFTER)
+    job = jobs_collection.find_one_and_update({"status": "pending"}, {"$set": {"status": "processing"}}, sort=[("created_at", 1)], return_document=ReturnDocument.AFTER)
+    if job:
+        # MongoDB returns ObjectId, we need to convert it to string for the logic
+        job['_id'] = str(job['_id'])
+    return job
 
-def complete_job(job_id):
-    jobs_collection.delete_one({"_id": job_id})
+def complete_job(job_id_str):
+    from bson.objectid import ObjectId
+    jobs_collection.delete_one({"_id": ObjectId(job_id_str)})
 
 def get_pending_jobs(user_id):
     return list(jobs_collection.find({"user_id": user_id, "status": "pending"}))
 
 def clear_pending_jobs(user_id):
     return jobs_collection.delete_many({"user_id": user_id, "status": "pending"}).deleted_count
+
+def count_pending_jobs_for_task(task_id):
+    """Counts remaining jobs for a specific task."""
+    return jobs_collection.count_documents({"task_id": task_id, "status": "pending"})
 
 # --- User Config ---
 def get_user_config(user_id):
@@ -78,4 +87,3 @@ def add_file_detail(task_id, file_id, media_type):
 
 def get_file_details(task_id):
     return file_details_collection.find_one({"_id": task_id})
-
