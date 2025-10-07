@@ -314,10 +314,19 @@ def run_web_server():
     logger.info(f"Keep-alive server on port {port}"); httpd.serve_forever()
 
 async def main():
-    if not shutil.which("ffmpeg"): logger.error("CRITICAL: ffmpeg is not installed or not in the system's PATH.")
-    else: logger.info("ffmpeg installation confirmed.")
+    # --- STARTUP DIAGNOSTICS ---
+    logger.info("--- Configuration Diagnostics ---")
+    logger.info(f"Loaded ADMIN_IDS: {ADMIN_IDS}")
+    logger.info(f"Loaded USERBOT_USER_ID: {USERBOT_USER_ID}")
+    if not shutil.which("ffmpeg"):
+        logger.error("CRITICAL: ffmpeg is not installed or not in the system's PATH.")
+    else:
+        logger.info("ffmpeg installation confirmed.")
+    logger.info("---------------------------------")
+    
     if not all([TELEGRAM_BOT_TOKEN, API_ID, API_HASH, USERBOT_SESSION_STRING, ADMIN_IDS, BOT_USERNAME, USERBOT_USER_ID]):
         raise ValueError("One or more required environment variables are missing!")
+
     web_thread = Thread(target=run_web_server, daemon=True); web_thread.start()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
@@ -333,17 +342,20 @@ async def main():
     application.add_handler(CommandHandler("cc", clear_queue_command))
     application.add_handler(CommandHandler("ce", clear_queue_command))
 
-    # --- Message Handlers ---
+    # --- Message Handlers (Reworked for clarity and stability) ---
     userbot_filter = filters.User(user_id=USERBOT_USER_ID)
     
-    # Handler for media sent by the userbot
-    application.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & userbot_filter, forwarder_handler))
+    # Group 1: This group handles specific, high-priority messages.
+    # Handler for media sent by the userbot (for relaying).
+    application.add_handler(MessageHandler(filters.PHOTO & userbot_filter, forwarder_handler), group=1)
+    application.add_handler(MessageHandler(filters.VIDEO & userbot_filter, forwarder_handler), group=1)
     
-    # Handler for /fetch commands
-    application.add_handler(MessageHandler(filters.Regex(r'^/fetch_'), fetch_command))
+    # Handler for /fetch commands, which are text messages but not standard commands.
+    application.add_handler(MessageHandler(filters.Regex(r'^/fetch_'), fetch_command), group=1)
     
-    # Handler for links sent by NORMAL users (ignores userbot and commands)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~userbot_filter, handle_message))
+    # Group 2: This is the general-purpose handler for links.
+    # It explicitly ignores commands and any messages from the userbot to prevent conflicts.
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~userbot_filter, handle_message), group=2)
     
     # --- Scheduler and Application Lifecycle ---
     scheduler = AsyncIOScheduler(); scheduler.add_job(check_and_send_stats, 'interval', minutes=15, args=[application.bot]);
