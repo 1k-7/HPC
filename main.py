@@ -162,7 +162,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("👻 <b>Scan Complete.</b>\nNo valid media found on the page(s).", parse_mode=ParseMode.HTML); return
     videos_count = sum(1 for media_url, _ in scraped_media if any(ext in media_url.lower() for ext in ['.mp4', '.mov', '.webm']))
     images_count = len(scraped_media) - videos_count
-    log_message = (f"🔗 <b>Link Submission</b>\n\n<b>User:</b> {escape_html(user.full_name)} (<code>{user.id}</code>)\n<b>Link(s):</b>\n" + "\n".join(f"<code>{u}</code>" for u in urls) + f"\n\n<b>Media Found:</b> {len(scraped_media)}\n" + (f"<b>Videos:</b> {videos_count}\n" if videos_count > 0 else "") + (f"<b>Images:</b> {images_count}\n" if images_count > 0 else "") + f"\n<b>Fetch Command:</b> <code>/fetch_{task_id}</code>")
+    log_message = (f"🔗 <b>Link Submission</b>\n\n<b>User:</b> {escape_html(user.full_name)} (<code>{user.id}</code>)\n<b>Link(s):</b>\n" + "\n".join(f"<code>{escape_html(u)}</code>" for u in urls) + f"\n\n<b>Media Found:</b> {len(scraped_media)}\n" + (f"<b>Videos:</b> {videos_count}\n" if videos_count > 0 else "") + (f"<b>Images:</b> {images_count}\n" if images_count > 0 else "") + f"\n<b>Fetch Command:</b> <code>/fetch_{task_id}</code>")
     await log_to_topic(context.bot, 'user_activity', log_message)
     if is_in_frenzy:
         for media_url, referer_url in scraped_media: database.add_job(user_id, media_url, referer_url, task_id)
@@ -237,7 +237,7 @@ async def set_supergroup_command(update: Update, context: ContextTypes.DEFAULT_T
             topic_ids[name.lower().replace(" ", "_")] = topic.message_thread_id
         database.set_supergroup(chat.id, topic_ids)
         await update.message.reply_text("💠 <b>Supergroup Linked.</b>\nLogging channels are now active.", parse_mode=ParseMode.HTML)
-    except Exception as e: await update.message.reply_text(f"🏮 <b>Setup Failed:</b> <code>{e}</code>", parse_mode=ParseMode.HTML)
+    except Exception as e: await update.message.reply_text(f"🏮 <b>Setup Failed:</b> <code>{escape_html(str(e))}</code>", parse_mode=ParseMode.HTML)
 
 async def check_and_send_stats(bot: Bot):
     global last_sent_stats; current_stats = database.get_stats()
@@ -246,9 +246,10 @@ async def check_and_send_stats(bot: Bot):
         if not settings: return
         stats_message = "📊 <b>Bot Stats</b>\n\n"
         for key, value in current_stats.items():
-            if key != '_id': stats_message += f"<b>{key.replace('_', ' ').title()}:</b> <code>{value}</code>\n"
+            if key != '_id': stats_message += f"<b>{escape_html(key.replace('_', ' ').title())}:</b> <code>{value}</code>\n"
         await log_to_topic(bot, 'stats', stats_message)
         last_sent_stats = current_stats; logger.info("Sent stats update.")
+
 async def log_to_topic(bot: Bot, topic_key: str, text: str):
     settings = database.get_settings()
     if settings and 'supergroup_id' in settings:
@@ -256,8 +257,10 @@ async def log_to_topic(bot: Bot, topic_key: str, text: str):
         if topic_key in topic_ids:
             try: await bot.send_message(chat_id=settings['supergroup_id'], message_thread_id=topic_ids[topic_key], text=text, parse_mode=ParseMode.HTML)
             except Exception as e: logger.error(f"Failed to log to topic '{topic_key}': {e}")
+
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self): self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers(); self.wfile.write(b"ok")
+
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     httpd = HTTPServer(('', port), HealthCheckHandler)
@@ -269,7 +272,7 @@ async def main():
     web_thread = Thread(target=run_web_server, daemon=True); web_thread.start()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # --- Using the Simple, Proven Handler Registration ---
+    # --- Simple, linear handler registration ---
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("setsupergroup", set_supergroup_command, filters=admin_filter))
     application.add_handler(CommandHandler("frenzy", frenzy_command))
