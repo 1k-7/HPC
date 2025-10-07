@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 last_sent_stats = {}
 admin_filter = filters.User(user_id=ADMIN_IDS)
 
-# --- NEW: Logging Decorator ---
+# --- Logging Decorator ---
 def log_user_activity(func):
     """Decorator that logs user activity for command handlers."""
     @wraps(func)
@@ -94,7 +94,10 @@ async def process_single_file(semaphore: asyncio.Semaphore, user_id: int, media_
                 while True:
                     try:
                         if is_video:
-                            await userbot.send_video(BOT_USERNAME, full_path, caption=caption, thumb=thumb_path, duration=duration, width=width, height=height)
+                            await userbot.send_video(
+                                BOT_USERNAME, full_path, caption=caption, thumb=thumb_path,
+                                duration=duration, width=width, height=height
+                            )
                         else:
                             await userbot.send_photo(BOT_USERNAME, full_path, caption=caption)
                         database.update_stats('videos_sent' if is_video else 'images_sent')
@@ -183,7 +186,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     videos_count = sum(1 for media_url, _ in scraped_media if any(ext in media_url.lower() for ext in ['.mp4', '.mov', '.webm']))
     images_count = len(scraped_media) - videos_count
 
-    # Use MarkdownV2 for logs as well for consistency
     log_message = (
         f"🔗 *Link Submission*\n\n"
         f"*User:* {user.full_name} (`{user.id}`)\n"
@@ -209,7 +211,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @log_user_activity
 async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # --- FIX: Correctly parse the task ID ---
     if not update.message.text.startswith('/fetch_'):
         await update.message.reply_text("🏮 *Invalid Command\.*\nUse the format `/fetch_taskID`\.", parse_mode=ParseMode.MARKDOWN_V2); return
     
@@ -320,6 +321,7 @@ async def main():
     web_thread = Thread(target=run_web_server, daemon=True); web_thread.start()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
+    # --- Command Handlers ---
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("setsupergroup", set_supergroup_command, filters=admin_filter))
     application.add_handler(CommandHandler("frenzy", frenzy_command))
@@ -331,14 +333,21 @@ async def main():
     application.add_handler(CommandHandler("cc", clear_queue_command))
     application.add_handler(CommandHandler("ce", clear_queue_command))
 
+    # --- Message Handlers ---
+    userbot_filter = filters.User(user_id=USERBOT_USER_ID)
+    
+    # Handler for media sent by the userbot
+    application.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & userbot_filter, forwarder_handler))
+    
+    # Handler for /fetch commands
     application.add_handler(MessageHandler(filters.Regex(r'^/fetch_'), fetch_command))
-
-    user_filter = filters.User(user_id=USERBOT_USER_ID)
-    application.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & user_filter, forwarder_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    scheduler = AsyncIOScheduler(); scheduler.add_job(check_and_send_stats, 'interval', minutes=15, args=[application.bot])
-
+    
+    # Handler for links sent by NORMAL users (ignores userbot and commands)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~userbot_filter, handle_message))
+    
+    # --- Scheduler and Application Lifecycle ---
+    scheduler = AsyncIOScheduler(); scheduler.add_job(check_and_send_stats, 'interval', minutes=15, args=[application.bot]);
+    
     async with application:
         scheduler.start()
         worker_task = asyncio.create_task(frenzy_worker_loop())
