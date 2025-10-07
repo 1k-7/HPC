@@ -10,7 +10,7 @@ jobs_collection = db['jobs']
 users_collection = db['users']
 stats_collection = db['stats']
 settings_collection = db['settings']
-file_details_collection = db['file_details'] # For fetched files
+file_details_collection = db['file_details']
 
 # --- Settings ---
 def get_settings():
@@ -56,9 +56,8 @@ def update_stats(stat_type, count=1):
 def get_stats():
     return stats_collection.find_one({"_id": "global_stats"})
 
-# --- NEW: File Fetching Logic ---
+# --- File Fetching Logic ---
 def add_file_detail(task_id, file_id, media_type):
-    """Adds a file's details to the database, associated with a task_id."""
     file_details_collection.update_one(
         {"_id": task_id},
         {"$push": {"files": {"file_id": file_id, "media_type": media_type}}},
@@ -66,5 +65,4 @@ def add_file_detail(task_id, file_id, media_type):
     )
 
 def get_file_details(task_id):
-    """Retrieves all file details for a given task_id."""
     return file_details_collection.find_one({"_id": task_id})
