@@ -265,10 +265,7 @@ async def main():
     web_thread = Thread(target=run_web_server, daemon=True); web_thread.start()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # --- FINAL HANDLER REGISTRATION ---
-    # This uses the simple, linear order from your working file.
-    
-    # Command Handlers first
+    # --- Use the Simple, Proven Handler Registration from your working file ---
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("setsupergroup", set_supergroup_command, filters=admin_filter))
     application.add_handler(CommandHandler("frenzy", frenzy_command))
@@ -280,13 +277,12 @@ async def main():
     application.add_handler(CommandHandler("cc", clear_queue_command))
     application.add_handler(CommandHandler("ce", clear_queue_command))
 
-    # Then, specific Message Handlers
     user_filter = filters.User(user_id=USERBOT_USER_ID)
     application.add_handler(MessageHandler(filters.Regex(r'^/fetch_'), fetch_command))
     application.add_handler(MessageHandler(filters.PHOTO & user_filter, forwarder_handler))
     application.add_handler(MessageHandler(filters.VIDEO & user_filter, forwarder_handler))
     
-    # Finally, the general handler for links, which catches any text that isn't a command.
+    # This general-purpose handler for links comes after the more specific handlers.
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     scheduler = AsyncIOScheduler(); scheduler.add_job(check_and_send_stats, 'interval', minutes=15, args=[application.bot])
