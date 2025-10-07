@@ -13,6 +13,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Telegram (PTB) imports
 from telegram import Update, Bot
+from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # Pyrogram imports
@@ -48,7 +49,7 @@ async def process_single_file(semaphore: asyncio.Semaphore, user_id: int, media_
             local_filename = f"temp_{os.path.basename(requests.utils.urlparse(media_url).path)}"
             temp_dir = tempfile.gettempdir(); full_path = os.path.join(temp_dir, local_filename)
             with requests.get(media_url, headers={'Referer': referer_url}, stream=True) as r:
-                r.raise_for_status()
+                r.raise_for_status();
                 with open(full_path, 'wb') as f: shutil.copyfileobj(r.raw, f)
             is_video = any(ext in full_path.lower() for ext in ['.mp4', '.mov', '.webm'])
             if is_video:
@@ -57,7 +58,7 @@ async def process_single_file(semaphore: asyncio.Semaphore, user_id: int, media_
                     probe = ffmpeg.probe(full_path)
                     video_stream = next((s for s in probe['streams'] if s['codec_type'] == 'video'), None)
                     if video_stream:
-                        duration, width, height = int(float(video_stream.get('duration', 0))), int(video_stream.get('width', 0)), int(video_stream.get('height', 0))
+                        duration, width, height = int(float(video_stream.get('duration',0))), int(video_stream.get('width',0)), int(video_stream.get('height',0))
                     thumb_path = os.path.join(temp_dir, f"{os.path.basename(full_path)}.jpg")
                     (ffmpeg.input(full_path, ss=min(1, duration - 0.1) if duration > 1 else 0).output(thumb_path, vframes=1).overwrite_output().run(capture_stdout=True, capture_stderr=True))
                 except Exception as e:
@@ -101,25 +102,26 @@ async def forwarder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Failed to re-send message: {e}")
 
-# --- PTB Handlers ---
+# --- PTB Handlers with New Prompts ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     database.set_frenzy_mode(update.effective_user.id, False)
-    await update.message.reply_text("Bot ready. Send a link to process it. Use `/frenzy` to queue multiple links.")
+    await update.message.reply_text("✨ *System Online\.*\nReady for links\. Use `/frenzy` for bulk processing\.", parse_mode=ParseMode.MARKDOWN_V2)
 
 async def frenzy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     database.set_frenzy_mode(update.effective_user.id, True)
-    await update.message.reply_text("✅ **Frenzy Mode Activated**. I will now queue all links from your messages.")
+    await update.message.reply_text("⛩️ *Frenzy Mode Engaged\.*\nAll submitted links will be added to the queue\.", parse_mode=ParseMode.MARKDOWN_V2)
 
 async def cf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     database.set_frenzy_mode(update.effective_user.id, False)
-    await update.message.reply_text("⛔ **Normal Mode Activated**. I will process links in small batches.")
+    await update.message.reply_text("⚙️ *Normal Mode Engaged\.*\nProcessing links one by one, in real-time\.", parse_mode=ParseMode.MARKDOWN_V2)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     is_in_frenzy = database.get_user_config(user_id).get("frenzy_mode_active", False)
     urls = re.findall(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', update.message.text)
     if not urls: return
-    await update.message.reply_text(f"Found {len(urls)} link(s). Scraping for media...")
+    
+    await update.message.reply_text(f"📡 *Scanning {len(urls)} link(s)\.\.\.*", parse_mode=ParseMode.MARKDOWN_V2)
     scraped_media = []
     for url in urls:
         try:
@@ -128,18 +130,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 media_url = link.get('data-src-mp4') if link.get('data-media') == 'video' else link.get('href')
                 if media_url: scraped_media.append((media_url, url))
         except Exception as e: logger.error(f"Failed to scrape {url}: {e}")
+
     if not scraped_media:
-        await update.message.reply_text("Could not find any media on the page(s)."); return
+        await update.message.reply_text("👻 *Scan Complete\.*\nNo valid media found on the page\(s\)\.", parse_mode=ParseMode.MARKDOWN_V2); return
+    
     if is_in_frenzy:
         for media_url, referer_url in scraped_media:
             database.add_job(user_id, media_url, referer_url)
-        await update.message.reply_text(f"✅ Queued {len(scraped_media)} media files. The background worker will process them.")
+        await update.message.reply_text(f"⛩️ *Queue Updated\.*\nAdded {len(scraped_media)} files to the processing pipeline\.", parse_mode=ParseMode.MARKDOWN_V2)
     else:
-        await update.message.reply_text(f"Found {len(scraped_media)} files. Processing in small batches to ensure stability...")
+        await update.message.reply_text(f"📥 *Scrape Complete\.*\nFound {len(scraped_media)} files\. Initiating transfer\.\.\.", parse_mode=ParseMode.MARKDOWN_V2)
         semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
         tasks = [process_single_file(semaphore, user_id, media_url, referer_url) for media_url, referer_url in scraped_media]
         await asyncio.gather(*tasks)
-        await update.message.reply_text("✅ Task complete.")
+        await update.message.reply_text(f"✨ *Task Complete\.*", parse_mode=ParseMode.MARKDOWN_V2)
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self): self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers(); self.wfile.write(b"ok")
@@ -165,6 +169,7 @@ async def main():
     
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+    # NOTE: The scheduler is not being used in this version yet, but the setup is here
     scheduler = AsyncIOScheduler()
     async with application:
         scheduler.start()
@@ -178,5 +183,6 @@ async def main():
             if worker_task: worker_task.cancel(); await asyncio.sleep(1)
 
 if __name__ == '__main__':
-    print("Starting Bot in Restored Stable Mode...")
+    print("Starting Bot in Step 1 Mode (New Prompts)...")
     asyncio.run(main())
+
