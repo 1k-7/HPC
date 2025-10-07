@@ -46,7 +46,7 @@ def log_user_activity(func):
     @wraps(func)
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         user = update.effective_user
-        if user and update.message.text.startswith('/'):
+        if user and update.message.text and update.message.text.startswith('/'):
             log_message = (f"👤 *User Activity*\n\n*Name:* {user.full_name}\n*Username:* @{user.username}\n*ID:* `{user.id}`\n*Command:* `{update.message.text}`")
             await log_to_topic(context.bot, 'user_activity', log_message)
         return await func(update, context, *args, **kwargs)
@@ -188,6 +188,7 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"🏮 *Delivery Error\.*\nFailed to send one of the files from task `{task_id}`\.", parse_mode=ParseMode.MARKDOWN_V2)
         await asyncio.sleep(1)
 
+# (All other command handlers like target, status, etc., are unchanged)
 @log_user_activity
 async def target_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -244,7 +245,6 @@ async def check_and_send_stats(bot: Bot):
             if key != '_id': stats_message += f"*{key.replace('_', ' ').title()}*: `{value}`\n"
         await log_to_topic(bot, 'stats', stats_message)
         last_sent_stats = current_stats; logger.info("Sent stats update.")
-
 async def log_to_topic(bot: Bot, topic_key: str, text: str):
     settings = database.get_settings()
     if settings and 'supergroup_id' in settings:
@@ -252,10 +252,8 @@ async def log_to_topic(bot: Bot, topic_key: str, text: str):
         if topic_key in topic_ids:
             try: await bot.send_message(chat_id=settings['supergroup_id'], message_thread_id=topic_ids[topic_key], text=text, parse_mode=ParseMode.MARKDOWN_V2)
             except Exception as e: logger.error(f"Failed to log to topic '{topic_key}': {e}")
-
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self): self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers(); self.wfile.write(b"ok")
-
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     httpd = HTTPServer(('', port), HealthCheckHandler)
@@ -267,7 +265,10 @@ async def main():
     web_thread = Thread(target=run_web_server, daemon=True); web_thread.start()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # --- Use the Simple, Proven Handler Registration from your working file ---
+    # --- FINAL HANDLER REGISTRATION ---
+    # This uses the simple, linear order from your working file.
+    
+    # Command Handlers first
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("setsupergroup", set_supergroup_command, filters=admin_filter))
     application.add_handler(CommandHandler("frenzy", frenzy_command))
@@ -279,12 +280,13 @@ async def main():
     application.add_handler(CommandHandler("cc", clear_queue_command))
     application.add_handler(CommandHandler("ce", clear_queue_command))
 
+    # Then, specific Message Handlers
     user_filter = filters.User(user_id=USERBOT_USER_ID)
     application.add_handler(MessageHandler(filters.Regex(r'^/fetch_'), fetch_command))
     application.add_handler(MessageHandler(filters.PHOTO & user_filter, forwarder_handler))
     application.add_handler(MessageHandler(filters.VIDEO & user_filter, forwarder_handler))
     
-    # This general-purpose handler for links comes after the more specific handlers.
+    # Finally, the general handler for links, which catches any text that isn't a command.
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     scheduler = AsyncIOScheduler(); scheduler.add_job(check_and_send_stats, 'interval', minutes=15, args=[application.bot])
