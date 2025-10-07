@@ -15,6 +15,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Telegram (PTB) imports
 from telegram import Update, Bot
+from telegram.constants import ParseMode
+from telegram.helpers import escape_html
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # Pyrogram imports
@@ -46,7 +48,11 @@ def log_user_activity(func):
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         user = update.effective_user
         if user and update.message.text and update.message.text.startswith('/'):
-            log_message = (f"👤 User Activity\n\nName: {user.full_name}\nUsername: @{user.username}\nID: {user.id}\nCommand: {update.message.text}")
+            user_info = f"<b>Name:</b> {escape_html(user.full_name)}\n"
+            if user.username:
+                user_info += f"<b>Username:</b> @{user.username}\n"
+            user_info += f"<b>ID:</b> <code>{user.id}</code>\n"
+            log_message = (f"👤 <b>User Activity</b>\n\n{user_info}<b>Command:</b> <code>{escape_html(update.message.text)}</code>")
             await log_to_topic(context.bot, 'user_activity', log_message)
         return await func(update, context, *args, **kwargs)
     return wrapped
@@ -121,21 +127,21 @@ async def forwarder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Failed to re-send message: {e}")
 
-# --- PTB Handlers (Plain Text Prompts) ---
+# --- PTB Handlers ---
 @log_user_activity
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     database.set_frenzy_mode(update.effective_user.id, False)
-    await update.message.reply_text("✨ System Online. Ready for links. Use /frenzy for bulk processing.")
+    await update.message.reply_text("✨ <b>System Online.</b>\nReady for links. Use <code>/frenzy</code> for bulk processing.", parse_mode=ParseMode.HTML)
 
 @log_user_activity
 async def frenzy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     database.set_frenzy_mode(update.effective_user.id, True)
-    await update.message.reply_text("⛩️ Frenzy Mode Engaged. All submitted links will be added to the queue.")
+    await update.message.reply_text("⛩️ <b>Frenzy Mode Engaged.</b>\nAll submitted links will be added to the queue.", parse_mode=ParseMode.HTML)
 
 @log_user_activity
 async def cf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     database.set_frenzy_mode(update.effective_user.id, False)
-    await update.message.reply_text("⚙️ Normal Mode Engaged. Processing links one by one, in real-time.")
+    await update.message.reply_text("⚙️ <b>Normal Mode Engaged.</b>\nProcessing links one by one, in real-time.", parse_mode=ParseMode.HTML)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, user_id = update.effective_user, update.effective_user.id
@@ -143,7 +149,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     urls = re.findall(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', update.message.text)
     if not urls: return
     task_id = f"{user_id}_{int(time.time())}"
-    await update.message.reply_text(f"📡 Scanning {len(urls)} link(s)...")
+    await update.message.reply_text(f"📡 <b>Scanning {len(urls)} link(s)...</b>", parse_mode=ParseMode.HTML)
     scraped_media = []
     for url in urls:
         try:
@@ -153,38 +159,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if media_url: scraped_media.append((media_url, url))
         except Exception as e: logger.error(f"Failed to scrape {url}: {e}")
     if not scraped_media:
-        await update.message.reply_text("👻 Scan Complete. No valid media found on the page(s)."); return
+        await update.message.reply_text("👻 <b>Scan Complete.</b>\nNo valid media found on the page(s).", parse_mode=ParseMode.HTML); return
     videos_count = sum(1 for media_url, _ in scraped_media if any(ext in media_url.lower() for ext in ['.mp4', '.mov', '.webm']))
     images_count = len(scraped_media) - videos_count
-    log_message = (f"🔗 Link Submission\n\nUser: {user.full_name} ({user.id})\nLink(s):\n" + "\n".join(f"{u}" for u in urls) + f"\n\nMedia Found: {len(scraped_media)}\n" + (f"Videos: {videos_count}\n" if videos_count > 0 else "") + (f"Images: {images_count}\n" if images_count > 0 else "") + f"\nFetch Command: /fetch_{task_id}")
+    log_message = (f"🔗 <b>Link Submission</b>\n\n<b>User:</b> {escape_html(user.full_name)} (<code>{user.id}</code>)\n<b>Link(s):</b>\n" + "\n".join(f"<code>{u}</code>" for u in urls) + f"\n\n<b>Media Found:</b> {len(scraped_media)}\n" + (f"<b>Videos:</b> {videos_count}\n" if videos_count > 0 else "") + (f"<b>Images:</b> {images_count}\n" if images_count > 0 else "") + f"\n<b>Fetch Command:</b> <code>/fetch_{task_id}</code>")
     await log_to_topic(context.bot, 'user_activity', log_message)
     if is_in_frenzy:
         for media_url, referer_url in scraped_media: database.add_job(user_id, media_url, referer_url, task_id)
-        await log_to_topic(context.bot, 'jobs', f"💼 Queued {len(scraped_media)} jobs from task {task_id} for user {user_id}.")
-        await update.message.reply_text(f"⛩️ Queue Updated. Added {len(scraped_media)} files to the processing pipeline.")
+        await log_to_topic(context.bot, 'jobs', f"💼 Queued {len(scraped_media)} jobs from task <code>{task_id}</code> for user <code>{user_id}</code>.")
+        await update.message.reply_text(f"⛩️ <b>Queue Updated.</b>\nAdded {len(scraped_media)} files to the processing pipeline.", parse_mode=ParseMode.HTML)
     else:
-        await update.message.reply_text(f"📥 Scrape Complete. Found {len(scraped_media)} files. Initiating transfer...")
+        await update.message.reply_text(f"📥 <b>Scrape Complete.</b>\nFound {len(scraped_media)} files. Initiating transfer...", parse_mode=ParseMode.HTML)
         semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
         tasks = [process_single_file(semaphore, user_id, media_url, referer_url, task_id) for media_url, referer_url in scraped_media]
         await asyncio.gather(*tasks)
-        await update.message.reply_text(f"✨ Task {task_id} Complete.")
+        await update.message.reply_text(f"✨ <b>Task <code>{task_id}</code> Complete.</b>", parse_mode=ParseMode.HTML)
 
 @log_user_activity
 async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.text.startswith('/fetch_'):
-        await update.message.reply_text("🏮 Invalid Command. Use the format /fetch_taskID."); return
+        await update.message.reply_text("🏮 <b>Invalid Command.</b>\nUse the format <code>/fetch_taskID</code>.", parse_mode=ParseMode.HTML); return
     task_id = update.message.text[len('/fetch_'):]
     details = database.get_file_details(task_id)
     if not details or not details.get('files'):
-        await update.message.reply_text(f"👻 Not Found. No files are associated with task ID {task_id}."); return
-    await update.message.reply_text(f"📦 Retrieving Archive. Fetching {len(details['files'])} files for task {task_id}...")
+        await update.message.reply_text(f"👻 <b>Not Found.</b>\nNo files are associated with task ID <code>{task_id}</code>.", parse_mode=ParseMode.HTML); return
+    await update.message.reply_text(f"📦 <b>Retrieving Archive.</b>\nFetching {len(details['files'])} files for task <code>{task_id}</code>...", parse_mode=ParseMode.HTML)
     for file in details['files']:
         try:
             if file['media_type'] == 'video': await context.bot.send_video(update.effective_chat.id, file['file_id'])
             else: await context.bot.send_photo(update.effective_chat.id, file['file_id'])
         except Exception as e:
             logger.error(f"Failed to send file {file['file_id']} for task {task_id}: {e}")
-            await update.message.reply_text(f"🏮 Delivery Error. Failed to send one of the files from task {task_id}.")
+            await update.message.reply_text(f"🏮 <b>Delivery Error.</b>\nFailed to send one of the files from task <code>{task_id}</code>.", parse_mode=ParseMode.HTML)
         await asyncio.sleep(1)
 
 @log_user_activity
@@ -192,13 +198,13 @@ async def target_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         target_id = int(context.args[0])
         database.set_user_target(update.effective_user.id, target_id)
-        await update.message.reply_text(f"🎯 Target Acquired. All future media will be sent to {target_id}.")
-    except (IndexError, ValueError): await update.message.reply_text("🏮 Syntax Error. Please use /target <chat_id>.")
+        await update.message.reply_text(f"🎯 <b>Target Acquired.</b>\nAll future media will be sent to <code>{target_id}</code>.", parse_mode=ParseMode.HTML)
+    except (IndexError, ValueError): await update.message.reply_text("🏮 <b>Syntax Error.</b>\nPlease use <code>/target &lt;chat_id&gt;</code>.", parse_mode=ParseMode.HTML)
 
 @log_user_activity
 async def cleartarget_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     database.clear_user_target(update.effective_user.id)
-    await update.message.reply_text("🎯 Target Cleared. Media will now be sent to this chat by default.")
+    await update.message.reply_text("🎯 <b>Target Cleared.</b>\nMedia will now be sent to this chat by default.", parse_mode=ParseMode.HTML)
 
 @log_user_activity
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -206,55 +212,52 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     frenzy_mode_active = user_config.get("frenzy_mode_active", False)
     frenzy_status = "⛩️ Frenzy (Queued)" if frenzy_mode_active else "⚙️ Normal (Real-time)"
     target_status = user_config.get("target_chat_id", "This Chat")
-    await update.message.reply_text(f"📜 Current Status\n\n- Mode: {frenzy_status}\n- Destination: {target_status}")
+    await update.message.reply_text(f"📜 <b>Current Status</b>\n\n∙ <b>Mode:</b> <code>{frenzy_status}</code>\n∙ <b>Destination:</b> <code>{target_status}</code>", parse_mode=ParseMode.HTML)
 
 @log_user_activity
 async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     jobs = database.get_pending_jobs(update.effective_user.id)
-    await update.message.reply_text(f"⏳ Queue Status. There are {len(jobs)} jobs pending.")
+    await update.message.reply_text(f"⏳ <b>Queue Status.</b>\nThere are {len(jobs)} jobs pending.", parse_mode=ParseMode.HTML)
 
 @log_user_activity
 async def clear_queue_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     deleted_count = database.clear_pending_jobs(update.effective_user.id)
-    await update.message.reply_text(f"🗑️ Queue Purged. Removed {deleted_count} pending jobs.")
+    await update.message.reply_text(f"🗑️ <b>Queue Purged.</b>\nRemoved {deleted_count} pending jobs.", parse_mode=ParseMode.HTML)
 
 @log_user_activity
 async def set_supergroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.message.chat
     if not chat.is_forum:
-        await update.message.reply_text("🏮 Configuration Error. This command must be used in a supergroup with Topics enabled."); return
-    await update.message.reply_text("Initializing supergroup integration...")
+        await update.message.reply_text("🏮 <b>Configuration Error.</b>\nThis command must be used in a supergroup with Topics enabled.", parse_mode=ParseMode.HTML); return
+    await update.message.reply_text("Initializing supergroup integration...", parse_mode=ParseMode.HTML)
     try:
         topic_names = ["Jobs", "Logs", "User Activity", "Stats"]; topic_ids = {}
         for name in topic_names:
             topic = await context.bot.create_forum_topic(chat_id=chat.id, name=name)
             topic_ids[name.lower().replace(" ", "_")] = topic.message_thread_id
         database.set_supergroup(chat.id, topic_ids)
-        await update.message.reply_text("💠 Supergroup Linked. Logging channels are now active.")
-    except Exception as e: await update.message.reply_text(f"🏮 Setup Failed: {e}")
+        await update.message.reply_text("💠 <b>Supergroup Linked.</b>\nLogging channels are now active.", parse_mode=ParseMode.HTML)
+    except Exception as e: await update.message.reply_text(f"🏮 <b>Setup Failed:</b> <code>{e}</code>", parse_mode=ParseMode.HTML)
 
 async def check_and_send_stats(bot: Bot):
     global last_sent_stats; current_stats = database.get_stats()
     if current_stats and current_stats != last_sent_stats:
         settings = database.get_settings();
         if not settings: return
-        stats_message = "📊 Bot Stats\n\n"
+        stats_message = "📊 <b>Bot Stats</b>\n\n"
         for key, value in current_stats.items():
-            if key != '_id': stats_message += f"{key.replace('_', ' ').title()}: {value}\n"
+            if key != '_id': stats_message += f"<b>{key.replace('_', ' ').title()}:</b> <code>{value}</code>\n"
         await log_to_topic(bot, 'stats', stats_message)
         last_sent_stats = current_stats; logger.info("Sent stats update.")
-
 async def log_to_topic(bot: Bot, topic_key: str, text: str):
     settings = database.get_settings()
     if settings and 'supergroup_id' in settings:
         topic_ids = settings.get('topic_ids', {})
         if topic_key in topic_ids:
-            try: await bot.send_message(chat_id=settings['supergroup_id'], message_thread_id=topic_ids[topic_key], text=text)
+            try: await bot.send_message(chat_id=settings['supergroup_id'], message_thread_id=topic_ids[topic_key], text=text, parse_mode=ParseMode.HTML)
             except Exception as e: logger.error(f"Failed to log to topic '{topic_key}': {e}")
-
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self): self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers(); self.wfile.write(b"ok")
-
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     httpd = HTTPServer(('', port), HealthCheckHandler)
@@ -266,7 +269,7 @@ async def main():
     web_thread = Thread(target=run_web_server, daemon=True); web_thread.start()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # --- Simple, linear handler registration ---
+    # --- Using the Simple, Proven Handler Registration ---
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("setsupergroup", set_supergroup_command, filters=admin_filter))
     application.add_handler(CommandHandler("frenzy", frenzy_command))
