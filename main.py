@@ -19,7 +19,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 # Telegram (PTB) imports
 from telegram import Update, Bot
 from telegram.constants import ParseMode
-from telegram.error import Conflict
+from telegram.error import Conflict, Forbidden
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # Pyrogram imports
@@ -40,7 +40,8 @@ USERBOT_USER_ID = int(os.environ.get("USERBOT_USER_ID"))
 CONCURRENCY_LIMIT = 2
 
 START_TIME = time.time()
-httpd = None # Global webserver instance
+httpd = None
+active_normal_tasks = {} # For the /stop command
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -48,50 +49,38 @@ logger = logging.getLogger(__name__)
 last_sent_stats = {}
 admin_filter = filters.User(user_id=ADMIN_IDS)
 
-# --- NEW: Conflict Error Handler ---
+# --- Anti-Conflict Error Handler ---
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles errors from the bot, specifically for GetUpdates conflicts."""
     global httpd
     if isinstance(context.error, Conflict):
         uptime = time.time() - START_TIME
-        logger.warning(f"GetUpdates conflict detected. Uptime: {uptime:.2f} seconds.")
         if uptime > 15:
-            logger.error("This is an old instance. Shutting down to prevent conflicts.")
-            
-            # 1. Stop the bot gracefully
+            logger.error("Old instance detected. Shutting down to prevent conflicts.")
             await context.application.shutdown()
-            
-            # 2. Stop the webserver
             if httpd:
-                shutdown_thread = Thread(target=httpd.shutdown)
-                shutdown_thread.start()
-                logger.info("Web server shutdown initiated.")
-
-            # 3. Forcefully exit the entire process
+                Thread(target=httpd.shutdown).start()
             os._exit(1)
 
-# --- Helper for Alphanumeric IDs ---
+# --- Helper Functions ---
 def generate_task_id(length=12):
     alphabet = string.ascii_lowercase + string.digits
     return ''.join(secrets.choice(alphabet) for i in range(length))
 
-# --- Logging Decorator ---
 def log_user_activity(func):
     @wraps(func)
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         user = update.effective_user
         if user and update.message.text and update.message.text.startswith('/'):
-            user_info = f"<b>Name:</b> {html.escape(user.full_name)}\n"
-            if user.username:
-                user_info += f"<b>Username:</b> @{user.username}\n"
-            user_info += f"<b>ID:</b> <code>{user.id}</code>\n"
+            user_info = f"<b>Name:</b> {html.escape(user.full_name)}\n<b>ID:</b> <code>{user.id}</code>\n"
+            if user.username: user_info += f"<b>Username:</b> @{user.username}\n"
             log_message = (f"👤 <b>User Activity</b>\n\n{user_info}<b>Command:</b> <code>{html.escape(update.message.text)}</code>")
             await log_to_topic(context.bot, 'user_activity', log_message)
         return await func(update, context, *args, **kwargs)
     return wrapped
 
-# --- CORE TASK LOGIC ---
+# --- Core Task Logic ---
 async def process_single_file(semaphore: asyncio.Semaphore, user_id: int, media_url: str, referer_url: str, task_id: str):
+    # This function remains the same as the last working version
     async with semaphore:
         full_path, thumb_path = "", None
         try:
@@ -138,7 +127,6 @@ async def frenzy_worker_loop(bot: Bot):
         if job:
             await process_single_file(semaphore, job['user_id'], job['media_url'], job['referer_url'], job['task_id'])
             database.complete_job(job['_id'])
-            
             if database.count_pending_jobs_for_task(job['task_id']) == 0:
                 is_authorized = database.is_user_authorized(job['user_id'])
                 completion_message = "✨ <b>Task Complete.</b>"
@@ -173,18 +161,9 @@ async def forwarder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- PTB Handlers ---
 @log_user_activity
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    database.add_user(update.effective_user.id) # Add user for stats and broadcast
     database.set_frenzy_mode(update.effective_user.id, False)
     await update.message.reply_text("✨ <b>System Online.</b>\nReady for links.", parse_mode=ParseMode.HTML)
-
-@log_user_activity
-async def frenzy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    database.set_frenzy_mode(update.effective_user.id, True)
-    await update.message.reply_text("⛩️ <b>Frenzy Mode Engaged.</b>", parse_mode=ParseMode.HTML)
-
-@log_user_activity
-async def cf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    database.set_frenzy_mode(update.effective_user.id, False)
-    await update.message.reply_text("⚙️ <b>Normal Mode Engaged.</b>", parse_mode=ParseMode.HTML)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, user_id, chat_id = update.effective_user, update.effective_user.id, update.effective_chat.id
@@ -194,7 +173,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     task_id = generate_task_id()
     is_authorized = database.is_user_authorized(user_id)
-    status_message = await update.message.reply_text(f"Processing...", parse_mode=ParseMode.HTML)
+    status_message = await update.message.reply_text("Processing...", parse_mode=ParseMode.HTML)
+    
+    database.update_stats("links_processed", count=len(urls))
     
     scraped_media = []
     for url in urls:
@@ -211,7 +192,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     videos_count = sum(1 for media_url, _ in scraped_media if any(ext in media_url.lower() for ext in ['.mp4', '.mov', '.webm']))
     images_count = len(scraped_media) - videos_count
     
-    # --- CORRECTED LOGIC: Fetch ID is ALWAYS included in the log ---
     log_message = (f"🔗 <b>Link Submission</b>\n\n<b>User:</b> {html.escape(user.full_name)} (<code>{user.id}</code>)\n" + f"<b>Media Found:</b> {len(scraped_media)}\n" + (f"<b>Videos:</b> {videos_count}\n" if videos_count > 0 else "") + (f"<b>Images:</b> {images_count}\n" if images_count > 0 else "") + f"\n<b>Fetch Command:</b> <code>/fetch_{task_id}</code>")
     await log_to_topic(context.bot, 'user_activity', log_message)
 
@@ -223,16 +203,72 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_message.edit_text(f"📥 <b>{len(scraped_media)} files found.</b> Transferring...", parse_mode=ParseMode.HTML)
         semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
         tasks = [process_single_file(semaphore, user_id, media_url, referer_url, task_id) for media_url, referer_url in scraped_media]
-        await asyncio.gather(*tasks)
         
-        await status_message.edit_text("<i>🖇️ Completed</i>", parse_mode=ParseMode.HTML)
-        
-        completion_message = "✨ <b>Task finished.</b>"
-        if is_authorized:
-            completion_message += f"\nFetch ID: <code>/fetch_{task_id}</code>"
-        await update.message.reply_text(completion_message, parse_mode=ParseMode.HTML)
+        # Store and run the task for potential cancellation
+        main_task = asyncio.gather(*tasks)
+        active_normal_tasks[user_id] = main_task
+        try:
+            await main_task
+            await status_message.edit_text("<i>🖇️ Completed</i>", parse_mode=ParseMode.HTML)
+            completion_message = "✨ <b>Task finished.</b>"
+            if is_authorized:
+                completion_message += f"\nFetch ID: <code>/fetch_{task_id}</code>"
+            await update.message.reply_text(completion_message, parse_mode=ParseMode.HTML)
+        except asyncio.CancelledError:
+            await status_message.edit_text("🛑 <b>Task Cancelled.</b>", parse_mode=ParseMode.HTML)
+        finally:
+            if user_id in active_normal_tasks:
+                del active_normal_tasks[user_id]
 
-# (All other command handlers remain the same)
+
+# --- NEW COMMANDS & ALIASES ---
+@log_user_activity
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        await update.message.reply_text("Reply to a message to broadcast it.", parse_mode=ParseMode.HTML)
+        return
+
+    user_ids = database.get_all_user_ids()
+    success_count, fail_count = 0, 0
+    
+    await update.message.reply_text(f"📣 Starting broadcast to {len(user_ids)} users...")
+    
+    for user_id in user_ids:
+        try:
+            await context.bot.copy_message(chat_id=user_id, from_chat_id=update.message.chat_id, message_id=update.message.reply_to_message.message_id)
+            success_count += 1
+        except Forbidden:
+            fail_count += 1
+            logger.warning(f"Broadcast failed for user {user_id}: Bot was blocked or kicked.")
+        except Exception as e:
+            fail_count += 1
+            logger.error(f"Broadcast failed for user {user_id}: {e}")
+        await asyncio.sleep(0.1) # Avoid hitting rate limits
+
+    await update.message.reply_text(f"Broadcast complete.\n\n✅ Sent: {success_count}\n❌ Failed: {fail_count}", parse_mode=ParseMode.HTML)
+
+@log_user_activity
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id in active_normal_tasks:
+        task = active_normal_tasks[user_id]
+        task.cancel()
+        del active_normal_tasks[user_id]
+        await update.message.reply_text("🛑 Stopping current task...", parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text("No active normal-mode task to stop. For Frenzy mode, use /clear.", parse_mode=ParseMode.HTML)
+
+# (All other command handlers with aliases)
+@log_user_activity
+async def frenzy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    database.set_frenzy_mode(update.effective_user.id, True)
+    await update.message.reply_text("⛩️ <b>Frenzy Mode Engaged.</b>", parse_mode=ParseMode.HTML)
+
+@log_user_activity
+async def cf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    database.set_frenzy_mode(update.effective_user.id, False)
+    await update.message.reply_text("⚙️ <b>Normal Mode Engaged.</b>", parse_mode=ParseMode.HTML)
+
 @log_user_activity
 async def authfe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -255,12 +291,19 @@ async def unauthfe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @log_user_activity
 async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.text.startswith('/fetch_'):
-        await update.message.reply_text("🏮 <b>Invalid Command.</b>\nUse the format <code>/fetch_taskID</code>.", parse_mode=ParseMode.HTML); return
-    task_id = update.message.text[len('/fetch_'):]
+    command = update.message.text.split(' ')[0]
+    if command not in ['/fetch', '/f']:
+         task_id = command[len('/fetch_'):]
+    else:
+        try:
+            task_id = context.args[0]
+        except IndexError:
+            await update.message.reply_text("🏮 <b>Invalid Command.</b>\nUse <code>/fetch &lt;taskID&gt;</code> or <code>/fetch_taskID</code>.", parse_mode=ParseMode.HTML); return
+    
     details = database.get_file_details(task_id)
     if not details or not details.get('files'):
         await update.message.reply_text(f"👻 <b>Not Found.</b>\nNo files are associated with task ID <code>{task_id}</code>.", parse_mode=ParseMode.HTML); return
+    
     await update.message.reply_text(f"📦 <b>Retrieving Archive.</b>\nFetching {len(details['files'])} files for task <code>{task_id}</code>...", parse_mode=ParseMode.HTML)
     for file in details['files']:
         try:
@@ -294,12 +337,12 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @log_user_activity
 async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    jobs = database.get_pending_jobs(update.effective_user.id)
+    jobs = database.get_pending_jobs_for_user(update.effective_user.id)
     await update.message.reply_text(f"⏳ <b>Queue Status.</b>\nThere are {len(jobs)} jobs pending.", parse_mode=ParseMode.HTML)
 
 @log_user_activity
 async def clear_queue_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    deleted_count = database.clear_pending_jobs(update.effective_user.id)
+    deleted_count = database.clear_pending_jobs_for_user(update.effective_user.id)
     await update.message.reply_text(f"🗑️ <b>Queue Purged.</b>\nRemoved {deleted_count} pending jobs.", parse_mode=ParseMode.HTML)
 
 @log_user_activity
@@ -319,7 +362,8 @@ async def set_supergroup_command(update: Update, context: ContextTypes.DEFAULT_T
 
 async def check_and_send_stats(bot: Bot):
     global last_sent_stats; current_stats = database.get_stats()
-    if current_stats and current_stats != last_sent_stats:
+    if not current_stats: return
+    if current_stats != last_sent_stats:
         settings = database.get_settings();
         if not settings: return
         stats_message = "📊 <b>Bot Stats</b>\n\n"
@@ -327,6 +371,7 @@ async def check_and_send_stats(bot: Bot):
             if key != '_id': stats_message += f"<b>{html.escape(key.replace('_', ' ').title())}:</b> <code>{value}</code>\n"
         await log_to_topic(bot, 'stats', stats_message)
         last_sent_stats = current_stats; logger.info("Sent stats update.")
+
 async def log_to_topic(bot: Bot, topic_key: str, text: str):
     settings = database.get_settings()
     if settings and 'supergroup_id' in settings:
@@ -334,6 +379,7 @@ async def log_to_topic(bot: Bot, topic_key: str, text: str):
         if topic_key in topic_ids:
             try: await bot.send_message(chat_id=settings['supergroup_id'], message_thread_id=topic_ids[topic_key], text=text, parse_mode=ParseMode.HTML)
             except Exception as e: logger.error(f"Failed to log to topic '{topic_key}': {e}")
+            
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self): self.send_response(200); self.send_header('Content-type','text/plain'); self.end_headers(); self.wfile.write(b"ok")
 
@@ -352,21 +398,23 @@ async def main():
     
     application.add_error_handler(error_handler)
 
+    # --- Add all handlers with aliases ---
     application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("setsupergroup", set_supergroup_command, filters=admin_filter))
+    application.add_handler(CommandHandler(["setsupergroup", "ssg"], set_supergroup_command, filters=admin_filter))
     application.add_handler(CommandHandler("frenzy", frenzy_command))
-    application.add_handler(CommandHandler("cf", cf_command))
+    application.add_handler(CommandHandler(["cf", "calm"], cf_command))
     application.add_handler(CommandHandler("target", target_command))
     application.add_handler(CommandHandler("cleartarget", cleartarget_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("tasks", tasks_command))
-    application.add_handler(CommandHandler("cc", clear_queue_command))
-    application.add_handler(CommandHandler("ce", clear_queue_command))
-    application.add_handler(CommandHandler("authfe", authfe_command, filters=admin_filter))
-    application.add_handler(CommandHandler("unauthfe", unauthfe_command, filters=admin_filter))
+    application.add_handler(CommandHandler(["cc", "clear"], clear_queue_command))
+    application.add_handler(CommandHandler(["authfe", "af"], authfe_command, filters=admin_filter))
+    application.add_handler(CommandHandler(["unauthfe", "uaf"], unauthfe_command, filters=admin_filter))
+    application.add_handler(CommandHandler(["broadcast", "b"], broadcast_command, filters=admin_filter))
+    application.add_handler(CommandHandler("stop", stop_command))
 
     user_filter = filters.User(user_id=USERBOT_USER_ID)
-    application.add_handler(MessageHandler(filters.Regex(r'^/fetch_'), fetch_command))
+    application.add_handler(MessageHandler(filters.Regex(r'^\/(fetch_|f_)'), fetch_command))
     application.add_handler(MessageHandler(filters.PHOTO & user_filter, forwarder_handler))
     application.add_handler(MessageHandler(filters.VIDEO & user_filter, forwarder_handler))
     
